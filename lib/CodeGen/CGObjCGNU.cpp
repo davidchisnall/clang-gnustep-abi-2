@@ -1118,10 +1118,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // linker can remove the duplicate invocations.
     auto *InitVar = new llvm::GlobalVariable(TheModule, LoadFunction->getType(),
         /*isConstant*/true, llvm::GlobalValue::LinkOnceAnyLinkage,
-        LoadFunction, ".objc_init");
+        LoadFunction, ".objc_ctor");
+    // Check that this hasn't been renamed.  This shouldn't happen, because
+    // this function should be called precisely once.
+    assert(InitVar->getName() == ".objc_ctor");
     InitVar->setSection(".ctors");
     InitVar->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    InitVar->setComdat(TheModule.getOrInsertComdat(".objc_init"));
+    InitVar->setComdat(TheModule.getOrInsertComdat(".objc_ctor"));
     CGM.addCompilerUsedGlobal(InitVar);
     for (auto *C : Categories) {
       auto *Cat = cast<llvm::GlobalVariable>(C->stripPointerCasts());
