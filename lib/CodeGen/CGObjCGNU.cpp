@@ -199,20 +199,6 @@ protected:
                                                 ConstStr, Zeros);
   }
 
-  /// Generates a global structure, initialized by the elements in the vector.
-  /// The element types must match the types of the structure elements in the
-  /// first argument.
-  llvm::GlobalVariable *MakeGlobal(llvm::Constant *C,
-                                   CharUnits Align,
-                                   StringRef Name="",
-                                   llvm::GlobalValue::LinkageTypes linkage
-                                         =llvm::GlobalValue::InternalLinkage) {
-    auto GV = new llvm::GlobalVariable(TheModule, C->getType(), false,
-                                       linkage, C, Name);
-    GV->setAlignment(Align.getQuantity());
-    return GV;
-  }
-
   /// Returns a property name and encoding string.
   llvm::Constant *MakePropertyEncodingString(const ObjCPropertyDecl *PD,
                                              const Decl *Container) {
@@ -524,6 +510,11 @@ public:
   void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) override;
   llvm::Value *GenerateProtocolRef(CodeGenFunction &CGF,
                                    const ObjCProtocolDecl *PD) override;
+  /// Helper that generates protocol lists from properties.
+  /// These structures are the same in GNUstep v1 and v2 ABIs, but the protocol
+  /// structures that enclose them are not.
+  std::pair<llvm::Constant*, llvm::Constant*>
+  GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD);
   void GenerateProtocol(const ObjCProtocolDecl *PD) override;
   llvm::Function *ModuleInitFunction() override;
   llvm::Constant *GetPropertyGetFunction() override;
@@ -902,8 +893,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       PtrToInt8Ty,
       IntTy,
       IntTy,
-      LongTy,
-      nullptr);
+      LongTy);
     llvm::SmallVector<llvm::Constant*, 16> Ivars;
     for (unsigned int i = 0, e = IvarNames.size() ; i < e ; i++) {
       llvm::Constant *Elements[] = { IvarNames[i], IvarTypes[i], IvarOffsets[i],
@@ -923,15 +913,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
                                        CGM.getContext().getCharWidth()),
       llvm::ConstantArray::get(ObjCIvarArrayTy, Ivars),
     };
-    // Structure containing array and array count
-    llvm::StructType *ObjCIvarListTy = llvm::StructType::get(IntTy,
-      SizeTy,
-      ObjCIvarArrayTy,
-      nullptr);
 
     // Create an instance of the structure
-    return MakeGlobal(ObjCIvarListTy, Elements, CGM.getPointerAlign(),
-                      ".objc_ivar_list");
+    auto *ivar_list = EmitRuntimeStruct(".objc_ivar_list", Elements,
+          llvm::GlobalValue::LinkOnceODRLinkage);
+    ivar_list->setAlignment(CGM.getPointerAlign().getQuantity());
+    return ivar_list;
   }
 #if 0
   void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {
@@ -975,8 +962,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     SmallVector<llvm::Constant*, 16> OptionalMethodNames;
     SmallVector<llvm::Constant*, 16> OptionalMethodTypes;
     for (const auto *I : Methods) {
-      std::string TypeStr;
-      Context.getObjCEncodingForMethodDecl(I, TypeStr);
+      std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
       if (I->getImplementationControl() == ObjCMethodDecl::Optional) {
         OptionalMethodNames.push_back(
             MakeConstantString(I->getSelector().getAsString()));
@@ -1003,7 +989,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
 
   void GenerateProtocol(const ObjCProtocolDecl *PD) override {
     EmittedProtocol = true;
-    ASTContext &Context = CGM.getContext();
     std::string ProtocolName = PD->getNameAsString();
     
     // Use the protocol definition, if there is one.
@@ -1023,78 +1008,9 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     EmitProtocolMethodList(PD->class_methods(), ClassMethodList,
         OptionalClassMethodList);
 
-
-
-    // Property metadata: name, attributes, isSynthesized, setter name, setter
-    // types, getter name, getter types.
-    // The isSynthesized value is always set to 0 in a protocol.  It exists to
-    // simplify the runtime library by allowing it to use the same data
-    // structures for protocol metadata everywhere.
-    llvm::StructType *PropertyMetadataTy = llvm::StructType::get(
-            PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
-            PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, nullptr);
-    std::vector<llvm::Constant*> Properties;
-    std::vector<llvm::Constant*> OptionalProperties;
-
-    // FIXME: Too much copy and paste here!
-    // Add all of the property methods need adding to the method list and to the
-    // property metadata list.
-    for (auto *property : PD->properties()) {
-      std::vector<llvm::Constant*> Fields;
-
-      Fields.push_back(MakePropertyEncodingString(property, nullptr));
-      PushPropertyAttributes(Fields, property);
-
-      if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
-        std::string TypeStr;
-        Context.getObjCEncodingForMethodDecl(getter,TypeStr);
-        llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
-        Fields.push_back(MakeConstantString(getter->getSelector().getAsString()));
-        Fields.push_back(TypeEncoding);
-      } else {
-        Fields.push_back(NULLPtr);
-        Fields.push_back(NULLPtr);
-      }
-      if (ObjCMethodDecl *setter = property->getSetterMethodDecl()) {
-        std::string TypeStr;
-        Context.getObjCEncodingForMethodDecl(setter,TypeStr);
-        llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
-        Fields.push_back(MakeConstantString(setter->getSelector().getAsString()));
-        Fields.push_back(TypeEncoding);
-      } else {
-        Fields.push_back(NULLPtr);
-        Fields.push_back(NULLPtr);
-      }
-      if (property->getPropertyImplementation() == ObjCPropertyDecl::Optional) {
-        OptionalProperties.push_back(llvm::ConstantStruct::get(PropertyMetadataTy, Fields));
-      } else {
-        Properties.push_back(llvm::ConstantStruct::get(PropertyMetadataTy, Fields));
-      }
-    }
-    llvm::Constant *PropertyArray = llvm::ConstantArray::get(
-        llvm::ArrayType::get(PropertyMetadataTy, Properties.size()), Properties);
-    llvm::Constant* PropertyListInitFields[] =
-      {llvm::ConstantInt::get(IntTy, Properties.size()), NULLPtr, PropertyArray};
-
-    llvm::Constant *PropertyListInit =
-        llvm::ConstantStruct::getAnon(PropertyListInitFields);
-    llvm::Constant *PropertyList = new llvm::GlobalVariable(TheModule,
-        PropertyListInit->getType(), false, llvm::GlobalValue::InternalLinkage,
-        PropertyListInit, ".objc_property_list");
-
-    llvm::Constant *OptionalPropertyArray =
-        llvm::ConstantArray::get(llvm::ArrayType::get(PropertyMetadataTy,
-            OptionalProperties.size()) , OptionalProperties);
-    llvm::Constant* OptionalPropertyListInitFields[] = {
-        llvm::ConstantInt::get(IntTy, OptionalProperties.size()), NULLPtr,
-        OptionalPropertyArray };
-
-    llvm::Constant *OptionalPropertyListInit =
-        llvm::ConstantStruct::getAnon(OptionalPropertyListInitFields);
-    llvm::Constant *OptionalPropertyList = new llvm::GlobalVariable(TheModule,
-            OptionalPropertyListInit->getType(), false,
-            llvm::GlobalValue::InternalLinkage, OptionalPropertyListInit,
-            ".objc_property_list");
+    auto list = GenerateProtocolPropertyLists(PD);
+    llvm::Constant *PropertyList = list.first;
+    llvm::Constant *OptionalPropertyList = list.second;
 
     auto SymName = SymbolForProtocol(ProtocolName);
     auto *OldGV = TheModule.getGlobalVariable(SymName);
@@ -1233,14 +1149,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     //}
     EmitRuntimeStruct(".objc_null_selector", {NULLPtr, NULLPtr},
         llvm::GlobalValue::ExternalLinkage, true, SelSection);
-    // FIXME: Use EmitRuntimeStruct here:
     if (Categories.empty()) {
-      auto *Cat = MakeGlobal(llvm::StructType::get(PtrToInt8Ty, PtrToInt8Ty,
-            PtrTy, PtrTy, PtrTy, PtrTy, nullptr), {NULLPtr, NULLPtr, NULLPtr,
-          NULLPtr, NULLPtr, NULLPtr}, CGM.getPointerAlign(),
-          ".objc_null_category");
+      auto *Cat = EmitRuntimeStruct(".objc_null_category", {NULLPtr, NULLPtr,
+          NULLPtr, NULLPtr, NULLPtr, NULLPtr},
+          llvm::GlobalValue::LinkOnceODRLinkage, true, CatSection);
+      Cat->setAlignment(CGM.getPointerAlign().getQuantity());
       Cat->setSection(CatSection);
-      Cat->setAlignment(4);
       CGM.addUsedGlobal(Cat);
     }
     if (Classes.empty()) {
@@ -1254,7 +1168,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
           NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
           llvm::GlobalValue::ExternalLinkage, true, ProtocolSection);
     NullProto->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    NullProto->setAlignment(4);
+    NullProto->setAlignment(CGM.getPointerAlign().getQuantity());
     ConstantStrings.clear();
     Categories.clear();
     Classes.clear();
@@ -1434,8 +1348,7 @@ CGObjCGNU::CGObjCGNU(CodeGenModule &cgm, unsigned runtimeABIVersion,
       PtrToInt8Ty, // optional instance methods
       PtrToInt8Ty, // optional class methods
       PtrToInt8Ty, // properties
-      PtrToInt8Ty, // optional properties
-      nullptr);
+      PtrToInt8Ty);// optional properties
 
   ObjCSuperTy = llvm::StructType::get(IdTy, IdTy);
   PtrToObjCSuperTy = llvm::PointerType::getUnqual(ObjCSuperTy);
@@ -2269,6 +2182,82 @@ CGObjCGNU::GenerateEmptyProtocol(StringRef ProtocolName) {
                                         CGM.getPointerAlign());
 }
 
+
+std::pair<llvm::Constant*, llvm::Constant*>
+CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
+  ASTContext &Context = CGM.getContext();
+  llvm::Constant *PropertyList;
+  llvm::Constant *OptionalPropertyList;
+
+  llvm::StructType *propertyMetadataTy =
+    llvm::StructType::get(CGM.getLLVMContext(),
+      { PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
+        PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
+
+  unsigned numReqProperties = 0, numOptProperties = 0;
+  for (auto property : PD->instance_properties()) {
+    if (property->isOptional())
+      numOptProperties++;
+    else
+      numReqProperties++;
+  }
+
+  ConstantInitBuilder reqPropertyListBuilder(CGM);
+  auto reqPropertiesList = reqPropertyListBuilder.beginStruct();
+  reqPropertiesList.addInt(IntTy, numReqProperties);
+  reqPropertiesList.add(NULLPtr);
+  auto reqPropertiesArray = reqPropertiesList.beginArray(propertyMetadataTy);
+
+  ConstantInitBuilder optPropertyListBuilder(CGM);
+  auto optPropertiesList = optPropertyListBuilder.beginStruct();
+  optPropertiesList.addInt(IntTy, numOptProperties);
+  optPropertiesList.add(NULLPtr);
+  auto optPropertiesArray = optPropertiesList.beginArray(propertyMetadataTy);
+
+  // Add all of the property methods need adding to the method list and to the
+  // property metadata list.
+  for (auto *property : PD->instance_properties()) {
+    auto &propertiesArray =
+      (property->isOptional() ? optPropertiesArray : reqPropertiesArray);
+    auto fields = propertiesArray.beginStruct(propertyMetadataTy);
+
+    fields.add(MakePropertyEncodingString(property, nullptr));
+    PushPropertyAttributes(fields, property);
+
+    if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
+      std::string typeStr = Context.getObjCEncodingForMethodDecl(getter);
+      llvm::Constant *typeEncoding = MakeConstantString(typeStr);
+      fields.add(MakeConstantString(getter->getSelector().getAsString()));
+      fields.add(typeEncoding);
+    } else {
+      fields.add(NULLPtr);
+      fields.add(NULLPtr);
+    }
+    if (ObjCMethodDecl *setter = property->getSetterMethodDecl()) {
+      std::string typeStr = Context.getObjCEncodingForMethodDecl(setter);
+      llvm::Constant *typeEncoding = MakeConstantString(typeStr);
+      fields.add(MakeConstantString(setter->getSelector().getAsString()));
+      fields.add(typeEncoding);
+    } else {
+      fields.add(NULLPtr);
+      fields.add(NULLPtr);
+    }
+
+    fields.finishAndAddTo(propertiesArray);
+  }
+
+  reqPropertiesArray.finishAndAddTo(reqPropertiesList);
+  PropertyList =
+    reqPropertiesList.finishAndCreateGlobal(".objc_property_list",
+                                            CGM.getPointerAlign());
+
+  optPropertiesArray.finishAndAddTo(optPropertiesList);
+  OptionalPropertyList =
+    optPropertiesList.finishAndCreateGlobal(".objc_property_list",
+                                            CGM.getPointerAlign());
+  return { PropertyList, OptionalPropertyList };
+}
+
 void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   ASTContext &Context = CGM.getContext();
   std::string ProtocolName = PD->getNameAsString();
@@ -2332,78 +2321,9 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   // simplify the runtime library by allowing it to use the same data
   // structures for protocol metadata everywhere.
 
-  llvm::Constant *PropertyList;
-  llvm::Constant *OptionalPropertyList;
-  {
-    llvm::StructType *propertyMetadataTy =
-      llvm::StructType::get(CGM.getLLVMContext(),
-        { PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
-          PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
-
-    unsigned numReqProperties = 0, numOptProperties = 0;
-    for (auto property : PD->instance_properties()) {
-      if (property->isOptional())
-        numOptProperties++;
-      else
-        numReqProperties++;
-    }
-
-    ConstantInitBuilder reqPropertyListBuilder(CGM);
-    auto reqPropertiesList = reqPropertyListBuilder.beginStruct();
-    reqPropertiesList.addInt(IntTy, numReqProperties);
-    reqPropertiesList.add(NULLPtr);
-    auto reqPropertiesArray = reqPropertiesList.beginArray(propertyMetadataTy);
-
-    ConstantInitBuilder optPropertyListBuilder(CGM);
-    auto optPropertiesList = optPropertyListBuilder.beginStruct();
-    optPropertiesList.addInt(IntTy, numOptProperties);
-    optPropertiesList.add(NULLPtr);
-    auto optPropertiesArray = optPropertiesList.beginArray(propertyMetadataTy);
-
-    // Add all of the property methods need adding to the method list and to the
-    // property metadata list.
-    for (auto *property : PD->instance_properties()) {
-      auto &propertiesArray =
-        (property->isOptional() ? optPropertiesArray : reqPropertiesArray);
-      auto fields = propertiesArray.beginStruct(propertyMetadataTy);
-
-      fields.add(MakePropertyEncodingString(property, nullptr));
-      PushPropertyAttributes(fields, property);
-
-      if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
-        std::string typeStr = Context.getObjCEncodingForMethodDecl(getter);
-        llvm::Constant *typeEncoding = MakeConstantString(typeStr);
-        InstanceMethodTypes.push_back(typeEncoding);
-        fields.add(MakeConstantString(getter->getSelector().getAsString()));
-        fields.add(typeEncoding);
-      } else {
-        fields.add(NULLPtr);
-        fields.add(NULLPtr);
-      }
-      if (ObjCMethodDecl *setter = property->getSetterMethodDecl()) {
-        std::string typeStr = Context.getObjCEncodingForMethodDecl(setter);
-        llvm::Constant *typeEncoding = MakeConstantString(typeStr);
-        InstanceMethodTypes.push_back(typeEncoding);
-        fields.add(MakeConstantString(setter->getSelector().getAsString()));
-        fields.add(typeEncoding);
-      } else {
-        fields.add(NULLPtr);
-        fields.add(NULLPtr);
-      }
-
-      fields.finishAndAddTo(propertiesArray);
-    }
-
-    reqPropertiesArray.finishAndAddTo(reqPropertiesList);
-    PropertyList =
-      reqPropertiesList.finishAndCreateGlobal(".objc_property_list",
-                                              CGM.getPointerAlign());
-
-    optPropertiesArray.finishAndAddTo(optPropertiesList);
-    OptionalPropertyList =
-      optPropertiesList.finishAndCreateGlobal(".objc_property_list",
-                                              CGM.getPointerAlign());
-  }
+  auto list = GenerateProtocolPropertyLists(PD);
+  llvm::Constant *PropertyList = list.first;
+  llvm::Constant *OptionalPropertyList = list.second;
 
   // Protocols are objects containing lists of the methods implemented and
   // protocols adopted.
@@ -2620,10 +2540,6 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
     if (ObjCMethodDecl *setter = property->getSetterMethodDecl()) {
       std::string TypeStr = Context.getObjCEncodingForMethodDecl(setter);
       llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
-      if (isSynthesized) {
-        InstanceMethodTypes.push_back(TypeEncoding);
-        InstanceMethodSels.push_back(setter->getSelector());
-      }
       fields.add(MakeConstantString(setter->getSelector().getAsString()));
       fields.add(TypeEncoding);
     } else {
@@ -2843,7 +2759,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   //Generate metaclass for class methods
   llvm::Constant *MetaClassStruct = GenerateClassStructure(
       NULLPtr, NULLPtr, 0x12L, ClassName.c_str(), nullptr, Zeros[0],
-      NullPtr, ClassMethodList, NULLPtr, NULLPtr, NULLPtr, ZeroPtr, ZeroPtr,
+      NULLPtr, ClassMethodList, NULLPtr, NULLPtr, NULLPtr, ZeroPtr, ZeroPtr,
       true);
   if (CGM.getTriple().isOSBinFormatCOFF()) {
     auto Storage = llvm::GlobalValue::DefaultStorageClass;
