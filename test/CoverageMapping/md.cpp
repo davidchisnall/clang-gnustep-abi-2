@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fprofile-instr-generate -fcoverage-mapping -dump-coverage-mapping -emit-llvm-only -std=c++11 %s | FileCheck %s
+// RUN: %clang_cc1 -fprofile-instrument=clang -fcoverage-mapping -dump-coverage-mapping -emit-llvm-only -std=c++11 %s | FileCheck %s
 
 #define BREAK break
 
@@ -25,6 +25,17 @@ void foo(MD i) {
     nop();
   #define HANDLE_MD(X) else if (i == MD::X) { nop(); }
   #include "Inputs/md.def"
+}
+
+// CHECK: bar
+// CHECK-NEXT: File 0, [[@LINE+3]]:12 -> [[@LINE+8]]:2 = #0
+bool isVal1();
+bool isVal2();
+bool bar() {
+ #define HANDLE_MD(X) is##X() ||
+  return
+#include "Inputs/md.def"
+  0;
 }
 
 int main(int argc, const char *argv[]) {

@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
   #pragma omp teams
   {
     int i; // expected-note {{predetermined as private}}
-    #pragma omp distribute firstprivate(i), private(i) // expected-error {{private variable in '#pragma omp teams' cannot be firstprivate in '#pragma omp distribute'}}
+    #pragma omp distribute firstprivate(i) // expected-error {{firstprivate variable must be shared}}
     for (int k = 0; k < argc; ++k) ++k;
   }
   #pragma omp target
@@ -98,6 +98,7 @@ int main(int argc, char **argv) {
   #pragma omp target
   #pragma omp teams firstprivate(i)
   #pragma omp parallel private(i)
+  {}
   #pragma omp target
   #pragma omp teams reduction(+:i)
   #pragma omp distribute private(i)
@@ -113,20 +114,20 @@ int main(int argc, char **argv) {
   #pragma omp teams
   #pragma omp distribute firstprivate(i)
   for (int k = 0; k < 10; ++k) {
-    #pragma omp target
-    #pragma omp teams firstprivate(i)
-    #pragma omp distribute private(i)
-    for (int x = 0; x < 10; ++x) foo();
   }
+  #pragma omp target
+  #pragma omp teams firstprivate(i)
+  #pragma omp distribute private(i)
+  for (int x = 0; x < 10; ++x) foo();
   #pragma omp target
   #pragma omp teams reduction(+:i)
   #pragma omp distribute
   for (int k = 0; k < 10; ++k) {
-    #pragma omp target
-    #pragma omp teams reduction(+:i)
-    #pragma omp distribute private(i)
-    for (int x = 0; x < 10; ++x) foo();
   }
+  #pragma omp target
+  #pragma omp teams reduction(+:i)
+  #pragma omp distribute private(i)
+  for (int x = 0; x < 10; ++x) foo();
 
   return 0;
 }

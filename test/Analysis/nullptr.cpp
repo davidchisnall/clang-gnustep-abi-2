@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -std=c++11 -Wno-conversion-null -analyze -analyzer-checker=core,debug.ExprInspection -analyzer-store region -verify %s
+// RUN: %clang_analyze_cc1 -std=c++11 -Wno-conversion-null -analyzer-checker=core,debug.ExprInspection -analyzer-store region -verify %s
 
 void clang_analyzer_eval(int);
 
@@ -107,7 +107,7 @@ struct Type {
 void shouldNotCrash() {
   decltype(nullptr) p;
   if (getSymbol())
-    invokeF(p); // expected-warning{{Function call argument is an uninit}}
+    invokeF(p); // expected-warning{{1st function call argument is an uninit}}
   if (getSymbol())
     invokeF(nullptr);
   if (getSymbol()) {
@@ -125,4 +125,23 @@ void f(decltype(nullptr) p) {
 decltype(nullptr) returnsNullPtrType();
 void fromReturnType() {
   ((X *)returnsNullPtrType())->f(); // expected-warning{{Called C++ object pointer is null}}
+}
+
+#define AS_ATTRIBUTE __attribute__((address_space(256)))
+class AS1 {
+public:
+  int x;
+  ~AS1() {
+    int AS_ATTRIBUTE *x = 0;
+    *x = 3; // no-warning
+  }
+};
+void test_address_space_field_access() {
+  AS1 AS_ATTRIBUTE *pa = 0;
+  pa->x = 0; // no-warning
+}
+void test_address_space_bind() {
+  AS1 AS_ATTRIBUTE *pa = 0;
+  AS1 AS_ATTRIBUTE &r = *pa;
+  r.x = 0; // no-warning
 }

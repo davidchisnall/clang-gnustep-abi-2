@@ -82,6 +82,7 @@
 // RUN: %clang -no-canonical-prefixes -target x86_64-pc-freebsd8 -static %s \
 // RUN:   --sysroot=%S/Inputs/multiarch_freebsd64_tree -### 2>&1 \
 // RUN:   | FileCheck --check-prefix=CHECK-STATIC %s
+// CHECK-STATIC: ld{{.*}}" "--eh-frame-hdr" "-Bstatic"
 // CHECK-STATIC: crt1.o
 // CHECK-STATIC: crtbeginT.o
 
@@ -126,7 +127,7 @@
 
 // RUN: %clang -target x86_64-pc-freebsd8 %s -### -flto 2>&1 \
 // RUN:   | FileCheck --check-prefix=CHECK-LTO %s
-// CHECK-LTO: ld{{.*}}" "-plugin{{.*}}LLVMgold.so
+// CHECK-LTO: ld{{.*}}" "-plugin{{.*}}{{[/\\]}}LLVMgold.{{dll|dylib|so}}
 
 // RUN: %clang -target sparc-unknown-freebsd8 %s -### -fpic -no-integrated-as 2>&1 \
 // RUN:   | FileCheck --check-prefix=CHECK-SPARC-PIE %s
@@ -136,3 +137,8 @@
 // RUN:   | FileCheck --check-prefix=CHECK-SPARC-CPU %s
 // CHECK-SPARC-CPU: cc1{{.*}}" "-target-cpu" "ultrasparc"
 // CHECK-SPARC-CPU: as{{.*}}" "-Av9
+
+// Check that -G flags are passed to the linker for mips
+// RUN: %clang -target mips-unknown-freebsd %s -### -G0 2>&1 \
+// RUN:   | FileCheck --check-prefix=CHECK-MIPS-G %s
+// CHECK-MIPS-G: ld{{.*}}" "-G0"

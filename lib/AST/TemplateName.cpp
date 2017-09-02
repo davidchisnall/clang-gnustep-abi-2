@@ -51,6 +51,22 @@ void SubstTemplateTemplateParmPackStorage::Profile(llvm::FoldingSetNodeID &ID,
   ArgPack.Profile(ID, Context);
 }
 
+TemplateName::TemplateName(void *Ptr) {
+  Storage = StorageType::getFromOpaqueValue(Ptr);
+}
+
+TemplateName::TemplateName(TemplateDecl *Template) : Storage(Template) {}
+TemplateName::TemplateName(OverloadedTemplateStorage *Storage)
+    : Storage(Storage) {}
+TemplateName::TemplateName(SubstTemplateTemplateParmStorage *Storage)
+    : Storage(Storage) {}
+TemplateName::TemplateName(SubstTemplateTemplateParmPackStorage *Storage)
+    : Storage(Storage) {}
+TemplateName::TemplateName(QualifiedTemplateName *Qual) : Storage(Qual) {}
+TemplateName::TemplateName(DependentTemplateName *Dep) : Storage(Dep) {}
+
+bool TemplateName::isNull() const { return Storage.isNull(); }
+
 TemplateName::NameKind TemplateName::getKind() const {
   if (Storage.is<TemplateDecl *>())
     return Template;
@@ -79,6 +95,57 @@ TemplateDecl *TemplateName::getAsTemplateDecl() const {
     return sub->getReplacement().getAsTemplateDecl();
 
   return nullptr;
+}
+
+OverloadedTemplateStorage *TemplateName::getAsOverloadedTemplate() const {
+  if (UncommonTemplateNameStorage *Uncommon =
+          Storage.dyn_cast<UncommonTemplateNameStorage *>())
+    return Uncommon->getAsOverloadedStorage();
+
+  return nullptr;
+}
+
+SubstTemplateTemplateParmStorage *
+TemplateName::getAsSubstTemplateTemplateParm() const {
+  if (UncommonTemplateNameStorage *uncommon =
+          Storage.dyn_cast<UncommonTemplateNameStorage *>())
+    return uncommon->getAsSubstTemplateTemplateParm();
+
+  return nullptr;
+}
+
+SubstTemplateTemplateParmPackStorage *
+TemplateName::getAsSubstTemplateTemplateParmPack() const {
+  if (UncommonTemplateNameStorage *Uncommon =
+          Storage.dyn_cast<UncommonTemplateNameStorage *>())
+    return Uncommon->getAsSubstTemplateTemplateParmPack();
+
+  return nullptr;
+}
+
+QualifiedTemplateName *TemplateName::getAsQualifiedTemplateName() const {
+  return Storage.dyn_cast<QualifiedTemplateName *>();
+}
+
+DependentTemplateName *TemplateName::getAsDependentTemplateName() const {
+  return Storage.dyn_cast<DependentTemplateName *>();
+}
+
+TemplateName TemplateName::getNameToSubstitute() const {
+  TemplateDecl *Decl = getAsTemplateDecl();
+
+  // Substituting a dependent template name: preserve it as written.
+  if (!Decl)
+    return *this;
+
+  // If we have a template declaration, use the most recent non-friend
+  // declaration of that template.
+  Decl = cast<TemplateDecl>(Decl->getMostRecentDecl());
+  while (Decl->getFriendObjectKind()) {
+    Decl = cast<TemplateDecl>(Decl->getPreviousDecl());
+    assert(Decl && "all declarations of template are friends");
+  }
+  return TemplateName(Decl);
 }
 
 bool TemplateName::isDependent() const {
@@ -177,6 +244,6 @@ void TemplateName::dump(raw_ostream &OS) const {
   print(OS, PrintingPolicy(LO));
 }
 
-void TemplateName::dump() const {
+LLVM_DUMP_METHOD void TemplateName::dump() const {
   dump(llvm::errs());
 }

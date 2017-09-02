@@ -36,8 +36,11 @@ DefinedOrUnknownSVal SValBuilder::makeZeroVal(QualType type) {
   if (type->isIntegralOrEnumerationType())
     return makeIntVal(0, type);
 
+  if (type->isArrayType() || type->isRecordType() || type->isVectorType() ||
+      type->isAnyComplexType())
+    return makeCompoundVal(type, BasicVals.getEmptySValList());
+
   // FIXME: Handle floats.
-  // FIXME: Handle structs.
   return UnknownVal();
 }
 
@@ -182,11 +185,12 @@ SValBuilder::getConjuredHeapSymbolVal(const Expr *E,
 DefinedSVal SValBuilder::getMetadataSymbolVal(const void *symbolTag,
                                               const MemRegion *region,
                                               const Expr *expr, QualType type,
+                                              const LocationContext *LCtx,
                                               unsigned count) {
   assert(SymbolManager::canSymbolicate(type) && "Invalid metadata symbol type");
 
   SymbolRef sym =
-      SymMgr.getMetadataSymbol(region, expr, type, count, symbolTag);
+      SymMgr.getMetadataSymbol(region, expr, type, LCtx, count, symbolTag);
 
   if (Loc::isLocType(type))
     return loc::MemRegionVal(MemMgr.getSymbolicRegion(sym));
@@ -213,16 +217,32 @@ SValBuilder::getDerivedRegionValueSymbolVal(SymbolRef parentSymbol,
   return nonloc::SymbolVal(sym);
 }
 
+DefinedSVal SValBuilder::getMemberPointer(const DeclaratorDecl* DD) {
+  assert(!DD || isa<CXXMethodDecl>(DD) || isa<FieldDecl>(DD));
+
+  if (auto *MD = dyn_cast_or_null<CXXMethodDecl>(DD)) {
+    // Sema treats pointers to static member functions as have function pointer
+    // type, so return a function pointer for the method.
+    // We don't need to play a similar trick for static member fields
+    // because these are represented as plain VarDecls and not FieldDecls
+    // in the AST.
+    if (MD->isStatic())
+      return getFunctionPointer(MD);
+  }
+
+  return nonloc::PointerToMember(DD);
+}
+
 DefinedSVal SValBuilder::getFunctionPointer(const FunctionDecl *func) {
-  return loc::MemRegionVal(MemMgr.getFunctionTextRegion(func));
+  return loc::MemRegionVal(MemMgr.getFunctionCodeRegion(func));
 }
 
 DefinedSVal SValBuilder::getBlockPointer(const BlockDecl *block,
                                          CanQualType locTy,
                                          const LocationContext *locContext,
                                          unsigned blockCount) {
-  const BlockTextRegion *BC =
-    MemMgr.getBlockTextRegion(block, locTy, locContext->getAnalysisDeclContext());
+  const BlockCodeRegion *BC =
+    MemMgr.getBlockCodeRegion(block, locTy, locContext->getAnalysisDeclContext());
   const BlockDataRegion *BD = MemMgr.getBlockDataRegion(BC, locContext,
                                                         blockCount);
   return loc::MemRegionVal(BD);
@@ -305,6 +325,7 @@ Optional<SVal> SValBuilder::getConstantVal(const Expr *E) {
     }
     }
     // FALLTHROUGH
+    LLVM_FALLTHROUGH;
   }
 
   // If we don't have a special case, fall back to the AST's constant evaluator.
@@ -367,6 +388,11 @@ SVal SValBuilder::evalBinOp(ProgramStateRef state, BinaryOperator::Opcode op,
   if (lhs.isUnknown() || rhs.isUnknown())
     return UnknownVal();
 
+  if (lhs.getAs<nonloc::LazyCompoundVal>() ||
+      rhs.getAs<nonloc::LazyCompoundVal>()) {
+    return UnknownVal();
+  }
+
   if (Optional<Loc> LV = lhs.getAs<Loc>()) {
     if (Optional<Loc> RV = rhs.getAs<Loc>())
       return evalBinOpLL(state, op, *LV, *RV, type);
@@ -421,6 +447,45 @@ static bool shouldBeModeledWithNoOp(ASTContext &Context, QualType ToTy,
     return false;
 
   return true;
+}
+
+// Handles casts of type CK_IntegralCast.
+// At the moment, this function will redirect to evalCast, except when the range
+// of the original value is known to be greater than the max of the target type.
+SVal SValBuilder::evalIntegralCast(ProgramStateRef state, SVal val,
+                                   QualType castTy, QualType originalTy) {
+
+  // No truncations if target type is big enough.
+  if (getContext().getTypeSize(castTy) >= getContext().getTypeSize(originalTy))
+    return evalCast(val, castTy, originalTy);
+
+  const SymExpr *se = val.getAsSymbolicExpression();
+  if (!se) // Let evalCast handle non symbolic expressions.
+    return evalCast(val, castTy, originalTy);
+
+  // Find the maximum value of the target type.
+  APSIntType ToType(getContext().getTypeSize(castTy),
+                    castTy->isUnsignedIntegerType());
+  llvm::APSInt ToTypeMax = ToType.getMaxValue();
+  NonLoc ToTypeMaxVal =
+      makeIntVal(ToTypeMax.isUnsigned() ? ToTypeMax.getZExtValue()
+                                        : ToTypeMax.getSExtValue(),
+                 castTy)
+          .castAs<NonLoc>();
+  // Check the range of the symbol being casted against the maximum value of the
+  // target type.
+  NonLoc FromVal = val.castAs<NonLoc>();
+  QualType CmpTy = getConditionType();
+  NonLoc CompVal =
+      evalBinOpNN(state, BO_LE, FromVal, ToTypeMaxVal, CmpTy).castAs<NonLoc>();
+  ProgramStateRef IsNotTruncated, IsTruncated;
+  std::tie(IsNotTruncated, IsTruncated) = state->assume(CompVal);
+  if (!IsNotTruncated && IsTruncated) {
+    // Symbol is truncated so we evaluate it as a cast.
+    NonLoc CastVal = makeNonLoc(se, originalTy, castTy);
+    return CastVal;
+  }
+  return evalCast(val, castTy, originalTy);
 }
 
 // FIXME: should rewrite according to the cast kind.

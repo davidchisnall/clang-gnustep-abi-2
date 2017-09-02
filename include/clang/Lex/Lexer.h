@@ -410,6 +410,26 @@ public:
                                          const SourceManager &SM,
                                          const LangOptions &LangOpts);
 
+  /// \brief Retrieve the name of the immediate macro expansion.
+  ///
+  /// This routine starts from a source location, and finds the name of the
+  /// macro responsible for its immediate expansion. It looks through any
+  /// intervening macro argument expansions to compute this. It returns a
+  /// StringRef which refers to the SourceManager-owned buffer of the source
+  /// where that macro name is spelled. Thus, the result shouldn't out-live
+  /// that SourceManager.
+  ///
+  /// This differs from Lexer::getImmediateMacroName in that any macro argument
+  /// location will result in the topmost function macro that accepted it.
+  /// e.g.
+  /// \code
+  ///   MAC1( MAC2(foo) )
+  /// \endcode
+  /// for location of 'foo' token, this function will return "MAC1" while
+  /// Lexer::getImmediateMacroName will return "MAC2".
+  static StringRef getImmediateMacroNameForDiagnostics(
+      SourceLocation Loc, const SourceManager &SM, const LangOptions &LangOpts);
+
   /// \brief Compute the preamble of the given file.
   ///
   /// The preamble of a file contains the initial comments, include directives,
@@ -443,6 +463,10 @@ public:
   /// \brief Returns true if the given character could appear in an identifier.
   static bool isIdentifierBodyChar(char c, const LangOptions &LangOpts);
 
+  /// \brief Checks whether new line pointed by Str is preceded by escape
+  /// sequence.
+  static bool isNewLineEscaped(const char *BufferStart, const char *Str);
+
   /// getCharAndSizeNoWarn - Like the getCharAndSize method, but does not ever
   /// emit a warning.
   static inline char getCharAndSizeNoWarn(const char *Ptr, unsigned &Size,
@@ -457,6 +481,11 @@ public:
     Size = 0;
     return getCharAndSizeSlowNoWarn(Ptr, Size, LangOpts);
   }
+
+  /// Returns the leading whitespace for line that corresponds to the given
+  /// location \p Loc.
+  static StringRef getIndentationForLine(SourceLocation Loc,
+                                         const SourceManager &SM);
 
   //===--------------------------------------------------------------------===//
   // Internal implementation interfaces.
@@ -617,6 +646,8 @@ private:
   
   bool IsStartOfConflictMarker(const char *CurPtr);
   bool HandleEndOfConflictMarker(const char *CurPtr);
+
+  bool lexEditorPlaceholder(Token &Result, const char *CurPtr);
 
   bool isCodeCompletionPoint(const char *CurPtr) const;
   void cutOffLexing() { BufferPtr = BufferEnd; }
