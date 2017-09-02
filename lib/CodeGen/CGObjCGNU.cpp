@@ -2648,9 +2648,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
       } else
         OffsetVar = new llvm::GlobalVariable(TheModule, IntTy,
           false, llvm::GlobalValue::ExternalLinkage,
-          OffsetValue,
-          "__objc_ivar_offset_value_" + ClassName +"." +
-          IVD->getNameAsString());
+          OffsetValue, OffsetName);
       IvarOffsets.push_back(OffsetValue);
       IvarOffsetValues.add(OffsetVar);
       Qualifiers::ObjCLifetime lt = IVD->getType().getQualifiers().getObjCLifetime();
