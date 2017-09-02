@@ -887,38 +887,42 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
                    ArrayRef<Qualifiers::ObjCLifetime> IvarOwnership) override {
     if (IvarNames.size() == 0)
       return NULLPtr;
-    // Get the method structure type.
+    llvm::DataLayout td(&TheModule);
+    ConstantInitBuilder builder(CGM);
+    // objc_ivar_list
+    auto fields = builder.beginStruct();
+    // count
+    fields.addInt(IntTy, IvarNames.size());
+    // size
     llvm::StructType *ObjCIvarTy = llvm::StructType::get(
       PtrToInt8Ty,
       PtrToInt8Ty,
       IntTy,
       IntTy,
       LongTy);
-    llvm::SmallVector<llvm::Constant*, 16> Ivars;
+    fields.addInt(SizeTy, td.getTypeSizeInBits(ObjCIvarTy) /
+        CGM.getContext().getCharWidth());
+    auto ivars = fields.beginArray();
     for (unsigned int i = 0, e = IvarNames.size() ; i < e ; i++) {
-      llvm::Constant *Elements[] = { IvarNames[i], IvarTypes[i], IvarOffsets[i],
-        IvarAlign[i], FlagsForOwnership(IvarOwnership[i]) };
-      Ivars.push_back(llvm::ConstantStruct::get(ObjCIvarTy, Elements));
+      // struct objc_ivar
+      auto ivar = ivars.beginStruct();
+      // name
+      ivar.add(IvarNames[i]);
+      // type
+      ivar.add(IvarTypes[i]);
+      // offset
+      ivar.add(IvarOffsets[i]);
+      // align
+      ivar.add(IvarAlign[i]);
+      // flags
+      ivar.add(FlagsForOwnership(IvarOwnership[i]));
+      ivar.finishAndAddTo(ivars);
     }
-
-    llvm::DataLayout td(&TheModule);
-    // Array of method structures
-    llvm::ArrayType *ObjCIvarArrayTy = llvm::ArrayType::get(ObjCIvarTy,
-        IvarNames.size());
-
-
-    llvm::Constant *Elements[] = {
-      llvm::ConstantInt::get(IntTy, (int)IvarNames.size()),
-      llvm::ConstantInt::get(SizeTy, td.getTypeSizeInBits(ObjCIvarTy) /
-                                       CGM.getContext().getCharWidth()),
-      llvm::ConstantArray::get(ObjCIvarArrayTy, Ivars),
-    };
+    ivars.finishAndAddTo(fields);
 
     // Create an instance of the structure
-    auto *ivar_list = EmitRuntimeStruct(".objc_ivar_list", Elements,
-          llvm::GlobalValue::LinkOnceODRLinkage);
-    ivar_list->setAlignment(CGM.getPointerAlign().getQuantity());
-    return ivar_list;
+    return fields.finishAndCreateGlobal(".objc_ivar_list", CGM.getPointerAlign(),
+        /*constant*/ false, llvm::GlobalValue::PrivateLinkage);
   }
 #if 0
   void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {
