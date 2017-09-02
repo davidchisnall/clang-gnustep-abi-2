@@ -1109,7 +1109,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         ProtocolEnd},
         llvm::GlobalValue::LinkOnceODRLinkage, true);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    CallRuntimeFunction(B, "__objc_load", {InitStruct, ClsRefStart, ClsRefEnd});;
+    CallRuntimeFunction(B, "__objc_load", {InitStruct});;
     B.CreateRetVoid();
     // Make sure that the optimisers don't delete this function.
     CGM.addCompilerUsedGlobal(LoadFunction);
