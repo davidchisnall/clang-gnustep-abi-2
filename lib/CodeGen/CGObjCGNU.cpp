@@ -2230,25 +2230,20 @@ CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
 
     fields.add(MakePropertyEncodingString(property, nullptr));
     PushPropertyAttributes(fields, property);
+    auto addIfExists = [&](ObjCMethodDecl *accessor) {
+      if (accessor) {
+        std::string typeStr = Context.getObjCEncodingForMethodDecl(accessor);
+        llvm::Constant *typeEncoding = MakeConstantString(typeStr);
+        fields.add(MakeConstantString(accessor->getSelector().getAsString()));
+        fields.add(typeEncoding);
+      } else {
+        fields.add(NULLPtr);
+        fields.add(NULLPtr);
+      }
+    };
 
-    if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
-      std::string typeStr = Context.getObjCEncodingForMethodDecl(getter);
-      llvm::Constant *typeEncoding = MakeConstantString(typeStr);
-      fields.add(MakeConstantString(getter->getSelector().getAsString()));
-      fields.add(typeEncoding);
-    } else {
-      fields.add(NULLPtr);
-      fields.add(NULLPtr);
-    }
-    if (ObjCMethodDecl *setter = property->getSetterMethodDecl()) {
-      std::string typeStr = Context.getObjCEncodingForMethodDecl(setter);
-      llvm::Constant *typeEncoding = MakeConstantString(typeStr);
-      fields.add(MakeConstantString(setter->getSelector().getAsString()));
-      fields.add(typeEncoding);
-    } else {
-      fields.add(NULLPtr);
-      fields.add(NULLPtr);
-    }
+    addIfExists(property->getGetterMethodDecl());
+    addIfExists(property->getSetterMethodDecl());
 
     fields.finishAndAddTo(propertiesArray);
   }
