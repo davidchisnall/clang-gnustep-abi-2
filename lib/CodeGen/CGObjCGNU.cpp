@@ -2526,28 +2526,23 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
 
     fields.add(MakePropertyEncodingString(property, OID));
     PushPropertyAttributes(fields, property, isSynthesized, isDynamic);
-    if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
-      std::string TypeStr = Context.getObjCEncodingForMethodDecl(getter);
-      llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
-      if (isSynthesized) {
-        InstanceMethodTypes.push_back(TypeEncoding);
-        InstanceMethodSels.push_back(getter->getSelector());
+    auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
+      if (accessor) {
+        std::string TypeStr = Context.getObjCEncodingForMethodDecl(accessor);
+        llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
+        if (isSynthesized) {
+          InstanceMethodTypes.push_back(TypeEncoding);
+          InstanceMethodSels.push_back(accessor->getSelector());
+        }
+        fields.add(MakeConstantString(accessor->getSelector().getAsString()));
+        fields.add(TypeEncoding);
+      } else {
+        fields.add(NULLPtr);
+        fields.add(NULLPtr);
       }
-      fields.add(MakeConstantString(getter->getSelector().getAsString()));
-      fields.add(TypeEncoding);
-    } else {
-      fields.add(NULLPtr);
-      fields.add(NULLPtr);
-    }
-    if (ObjCMethodDecl *setter = property->getSetterMethodDecl()) {
-      std::string TypeStr = Context.getObjCEncodingForMethodDecl(setter);
-      llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
-      fields.add(MakeConstantString(setter->getSelector().getAsString()));
-      fields.add(TypeEncoding);
-    } else {
-      fields.add(NULLPtr);
-      fields.add(NULLPtr);
-    }
+    };
+    addPropertyMethod(property->getGetterMethodDecl());
+    addPropertyMethod(property->getSetterMethodDecl());
     fields.finishAndAddTo(properties);
   }
   properties.finishAndAddTo(propertyList);
