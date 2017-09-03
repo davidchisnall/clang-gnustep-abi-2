@@ -1012,9 +1012,9 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     EmitProtocolMethodList(PD->class_methods(), ClassMethodList,
         OptionalClassMethodList);
 
-    auto list = GenerateProtocolPropertyLists(PD);
-    llvm::Constant *PropertyList = list.first;
-    llvm::Constant *OptionalPropertyList = list.second;
+    llvm::Constant *PropertyList;
+    llvm::Constant *OptionalPropertyList;
+    std::tie(PropertyList, OptionalPropertyList) = GenerateProtocolPropertyLists(PD);
 
     auto SymName = SymbolForProtocol(ProtocolName);
     auto *OldGV = TheModule.getGlobalVariable(SymName);
@@ -2328,9 +2328,9 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   // simplify the runtime library by allowing it to use the same data
   // structures for protocol metadata everywhere.
 
-  auto list = GenerateProtocolPropertyLists(PD);
-  llvm::Constant *PropertyList = list.first;
-  llvm::Constant *OptionalPropertyList = list.second;
+  llvm::Constant *PropertyList;
+  llvm::Constant *OptionalPropertyList;
+  std::tie(PropertyList, OptionalPropertyList) = GenerateProtocolPropertyLists(PD);
 
   // Protocols are objects containing lists of the methods implemented and
   // protocols adopted.
