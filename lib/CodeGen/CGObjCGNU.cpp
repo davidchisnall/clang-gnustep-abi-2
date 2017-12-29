@@ -39,6 +39,17 @@ using namespace clang;
 using namespace CodeGen;
 
 namespace {
+
+std::string SymbolNameForMethod( StringRef ClassName,
+     StringRef CategoryName, const Selector MethodName,
+    bool isClassMethod) {
+  std::string MethodNameColonStripped = MethodName.getAsString();
+  std::replace(MethodNameColonStripped.begin(), MethodNameColonStripped.end(),
+      ':', '_');
+  return (Twine(isClassMethod ? "_c_" : "_i_") + ClassName + "_" +
+    CategoryName + "_" + MethodNameColonStripped).str();
+}
+
 /// Class that lazily initialises the runtime function.  Avoids inserting the
 /// types and the function declaration into a module if they're not used, and
 /// avoids constructing the type more than once if it's used more than once.
@@ -435,6 +446,15 @@ protected:
   virtual llvm::Value *GetSelector(CodeGenFunction &CGF, Selector Sel,
                            const std::string &TypeEncoding);
 
+  /// Returns the name of ivar offset variables.  In the GNUstep v1 ABI, this
+  /// contains the class and ivar names, in the v2 ABI this contains the type
+  /// encoding as well.
+  virtual std::string GetIVarOffsetVariableName(const ObjCInterfaceDecl *ID,
+                                                const ObjCIvarDecl *Ivar) {
+    const std::string Name = "__objc_ivar_offset_" + ID->getNameAsString()
+      + '.' + Ivar->getNameAsString();
+    return Name;
+  }
   /// Returns the variable used to store the offset of an instance variable.
   llvm::GlobalVariable *ObjCIvarOffsetVariable(const ObjCInterfaceDecl *ID,
       const ObjCIvarDecl *Ivar);
@@ -794,16 +814,30 @@ class CGObjCGNUstep : public CGObjCGNU {
     }
 };
 
+/// GNUstep Objective-C ABI version 2 implementation.
+/// This is the ABI that provides a clean break with the legacy GCC ABI and
+/// cleans up a number of things that were added to work around 1980s linkers.
 class CGObjCGNUstep2 : public CGObjCGNUstep {
+  /// The section for selectors.
   const char *const SelSection = "__objc_selectors";
+  /// The section for classes.
   const char *const ClsSection = "__objc_classes";
+  /// The section for references to classes.  
   const char *const ClsRefSection = "__objc_class_refs";
+  /// The section for categories.
   const char *const CatSection = "__objc_cats";
+  /// The section for protocols.
   const char *const ProtocolSection = "__objc_protocols";
+  /// A flag indicating if we've emitted at least one protocol.
+  /// If we haven't, then we need to emit an empty protocol, to ensure that the
+  /// __start__objc_protocols and __stop__objc_protocols sections exist.
   bool EmittedProtocol = false;
+  /// Generate the name of a symbol for a reference to a class.  Accesses to
+  /// classes should be indirected via this.
   std::string SymbolForClassRef(StringRef Name) {
     return (StringRef("_OBJC_CLASS_REF_") + Name).str();
   }
+  /// Generate the name of a class symbol.
   std::string SymbolForClass(StringRef Name) {
     return (StringRef("_OBJC_CLASS_") + Name).str();
   }
@@ -835,24 +869,20 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       GV->setSection(Section);
     return GV;
   }
-  llvm::GlobalValue *GetClassVar(StringRef Name, bool isWeak=false) {
-    if (!isWeak)
-      EmitClassRef(Name);
+  llvm::GlobalVariable *GetClassVar(StringRef Name, bool isWeak=false) {
     std::string SymbolName = SymbolForClassRef(Name);
     auto *ClassSymbol = TheModule.getNamedGlobal(SymbolName);
     if (ClassSymbol)
       return ClassSymbol;
     ClassSymbol = new llvm::GlobalVariable(TheModule,
-        PtrTy, false, llvm::GlobalValue::LinkOnceODRLinkage,
-        MakeConstantString(Name), SymbolName);
-    ClassSymbol->setSection(ClsRefSection);
-    CGM.addUsedGlobal(ClassSymbol);
+        IdTy, false, llvm::GlobalValue::ExternalLinkage,
+        nullptr, SymbolName);
     assert(ClassSymbol->getName() == SymbolName);
     return ClassSymbol;
   }
-  virtual llvm::Value *GetClassNamed(CodeGenFunction &CGF,
-                                     const std::string &Name,
-                                     bool isWeak) override {
+  llvm::Value *GetClassNamed(CodeGenFunction &CGF,
+                             const std::string &Name,
+                             bool isWeak) override {
     return CGF.Builder.CreateLoad(Address(GetClassVar(Name, isWeak),
           CGM.getPointerAlign()));
   }
@@ -878,7 +908,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       default:
         Flag = 0;
     }
-    return llvm::ConstantInt::get(LongTy, Flag);
+    return llvm::ConstantInt::get(Int32Ty, Flag);
   }
   llvm::Constant *GenerateIvarList(ArrayRef<llvm::Constant *> IvarNames,
                    ArrayRef<llvm::Constant *> IvarTypes,
@@ -895,6 +925,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     fields.addInt(IntTy, IvarNames.size());
     // size
     llvm::StructType *ObjCIvarTy = llvm::StructType::get(
+      PtrToInt8Ty,
       PtrToInt8Ty,
       PtrToInt8Ty,
       IntTy,
@@ -1036,8 +1067,16 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       GV->setName(SymName);
     }
   }
+  llvm::Constant *EnforceType(llvm::Constant *Val, llvm::Type *Ty) {
+    if (Val->getType() == Ty)
+      return Val;
+    return llvm::ConstantExpr::getBitCast(Val, Ty);
+  }
   llvm::Value *GetSelector(CodeGenFunction &CGF, Selector Sel,
     const std::string &TypeEncoding) override {
+    return GetConstantSelector(Sel, TypeEncoding);
+  }
+  llvm::Constant *GetConstantSelector(Selector Sel, const std::string &TypeEncoding) {
     // @ is used as a special character in symbol names (used for symbol
     // versioning), so mangle the name to not include it.  Replace it with a
     // character that is not a valid type encoding character (and, being
@@ -1048,7 +1087,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     auto SelVarName = (StringRef(".objc_selector_") + Sel.getAsString() + "_" +
       MangledTypes).str();
     if (auto *GV = TheModule.getNamedGlobal(SelVarName))
-      return EnforceType(CGF.Builder, GV, SelectorTy);
+      return EnforceType(GV, SelectorTy);
     auto *Name = ExportUniqueString(Sel.getAsString(), ".objc_sel_name", true);
     llvm::Constant *Types = llvm::ConstantPointerNull::get(PtrTy);
     if (TypeEncoding.size() > 0) {
@@ -1067,7 +1106,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     }
     auto *GV = EmitRuntimeStruct(SelVarName, {Name, Types},
         llvm::GlobalValue::ExternalLinkage, true, SelSection);
-    auto *SelVal = EnforceType(CGF.Builder, GV, SelectorTy);
+    auto *SelVal = EnforceType(GV, SelectorTy);
     return SelVal;
   }
   llvm::Constant *GetSectionStart(StringRef Section) {
@@ -1158,7 +1197,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         llvm::GlobalValue::ExternalLinkage, true, SelSection);
     if (Categories.empty()) {
       auto *Cat = EmitRuntimeStruct(".objc_null_category", {NULLPtr, NULLPtr,
-          NULLPtr, NULLPtr, NULLPtr, NULLPtr},
+          NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
           llvm::GlobalValue::LinkOnceODRLinkage, true, CatSection);
       Cat->setAlignment(CGM.getPointerAlign().getQuantity());
       Cat->setSection(CatSection);
@@ -1180,6 +1219,341 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     Categories.clear();
     Classes.clear();
     return nullptr;//CGObjCGNU::ModuleInitFunction();
+  }
+  /// In the v2 ABI, ivar offset variables use the type encoding in their name
+  /// to trigger linker failures if the types don't match.
+  std::string GetIVarOffsetVariableName(const ObjCInterfaceDecl *ID,
+                                        const ObjCIvarDecl *Ivar) override {
+    std::string TypeEncoding;
+    CGM.getContext().getObjCEncodingForType(Ivar->getType(), TypeEncoding);
+    // Prevent the @ from being interpreted as a symbol version.
+    std::replace(TypeEncoding.begin(), TypeEncoding.end(),
+      '@', '\1');
+    const std::string Name = "__objc_ivar_offset_" + ID->getNameAsString()
+      + '.' + Ivar->getNameAsString() + '.' + TypeEncoding;
+    return Name;
+  }
+  llvm::Value *EmitIvarOffset(CodeGenFunction &CGF,
+                              const ObjCInterfaceDecl *Interface,
+                              const ObjCIvarDecl *Ivar) override {
+    const std::string Name = GetIVarOffsetVariableName(Interface, Ivar);
+    // Emit the variable and initialize it with what we think the correct value
+    // is.  This allows code compiled with non-fragile ivars to work correctly
+    // when linked against code which isn't (most of the time).
+    llvm::GlobalVariable *IvarOffsetPointer = TheModule.getNamedGlobal(Name);
+    if (!IvarOffsetPointer)
+      IvarOffsetPointer = new llvm::GlobalVariable(TheModule, IntTy, false,
+              llvm::GlobalValue::ExternalLinkage, nullptr, Name);
+    CharUnits Align = CGM.getIntAlign();
+    llvm::Value *Offset = CGF.Builder.CreateAlignedLoad(IvarOffsetPointer, Align);
+    if (Offset->getType() != PtrDiffTy)
+      Offset = CGF.Builder.CreateZExtOrBitCast(Offset, PtrDiffTy);
+    return Offset;
+  }
+  void GenerateClass(const ObjCImplementationDecl *OID) override {
+    ASTContext &Context = CGM.getContext();
+
+    // Get the class name
+    ObjCInterfaceDecl *classDecl =
+        const_cast<ObjCInterfaceDecl *>(OID->getClassInterface());
+    std::string className = classDecl->getNameAsString();
+    auto *classNameConstant = MakeConstantString(className);
+
+    ConstantInitBuilder builder(CGM);
+    auto metaclassFields = builder.beginStruct();
+    // struct objc_class *isa;
+    metaclassFields.addNullPointer(PtrTy);
+    // struct objc_class *super_class;
+    metaclassFields.addNullPointer(PtrTy);
+    // const char *name;
+    metaclassFields.add(classNameConstant);
+    // long version;
+    metaclassFields.addInt(LongTy, 0);
+    // unsigned long info;
+    // objc_class_flag_meta & objc_class_flag_new_abi
+    // FIXME: It probably doesn't make sense to set objc_class_flag_new_abi,
+    // because these are all from a new entry point and the runtime will
+    // auto-upgrade older class structures.
+    metaclassFields.addInt(LongTy, 0x12L);
+    // long instance_size;
+    // Setting this to zero is consistent with the older ABI, but it might be
+    // more sensible to set this to sizeof(struct objc_class)
+    metaclassFields.addInt(LongTy, 0);
+    // struct objc_ivar_list *ivars;
+    metaclassFields.addNullPointer(PtrTy);
+    // struct objc_method_list *methods
+    // FIXME: Almost identical code is copied and pasted below for the
+    // class, but refactoring it cleanly requires C++14 generic lambdas.
+    if (OID->classmeth_begin() == OID->classmeth_end())
+      metaclassFields.addNullPointer(PtrTy);
+    else {
+      ConstantInitBuilder b(CGM);
+      auto methodListBuilder = b.beginStruct();
+      // struct objc_method_list *next;
+      methodListBuilder.addNullPointer(PtrTy);
+      // int count;
+      methodListBuilder.addInt(IntTy, std::distance(OID->classmeth_begin(),
+                                                    OID->classmeth_end()));
+      auto methodArrayBuilder = methodListBuilder.beginArray();
+      for (const auto *I : OID->class_methods()) {
+        auto methodBuilder = methodArrayBuilder.beginStruct();
+        // SEL selector
+        methodBuilder.add(GetConstantSelector(I->getSelector(),
+              Context.getObjCEncodingForMethodDecl(I)));
+        // const char *types;
+        methodBuilder.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(I,
+              true)));
+        // IMP imp;
+        llvm::Constant *FnPtr =
+          TheModule.getFunction(SymbolNameForMethod(className, "",
+                                                    I->getSelector(),
+                                                    /*isClassMethod*/true));
+        assert(FnPtr && "Can't generate metadata for method that doesn't exist");
+        methodBuilder.addBitCast(FnPtr, IMPTy);
+        methodBuilder.finishAndAddTo(methodArrayBuilder);
+      }
+      methodArrayBuilder.finishAndAddTo(methodListBuilder);
+      auto methodList = methodListBuilder.finishAndCreateGlobal(".objc_ivar_list",
+          CGM.getPointerAlign(), /*constant*/ false, 
+          llvm::GlobalValue::PrivateLinkage);
+      metaclassFields.add(methodList);
+    }
+    // void *dtable;
+    metaclassFields.addNullPointer(PtrTy);
+    // struct objc_class *subclass_list
+    metaclassFields.addNullPointer(PtrTy);
+    // struct objc_class *sibling_class
+    metaclassFields.addNullPointer(PtrTy);
+    // struct objc_protocol_list *protocols;
+    metaclassFields.addNullPointer(PtrTy);
+    // struct reference_list *extra_data;
+    metaclassFields.addNullPointer(PtrTy);
+    // long abi_version;
+    metaclassFields.addInt(LongTy, 0);
+    // struct objc_property_list *properties
+    // FIXME: We should add class properties here.
+    metaclassFields.addNullPointer(PtrTy);
+
+    auto *metaclass = metaclassFields.finishAndCreateGlobal("_OBJC_METACLASS_"
+        + className, CGM.getPointerAlign());
+
+    auto classFields = builder.beginStruct();
+    // struct objc_class *isa;
+    classFields.add(metaclass);
+    // struct objc_class *super_class;
+    // Get the superclass name.
+    const ObjCInterfaceDecl * SuperClassDecl =
+      OID->getClassInterface()->getSuperClass();
+    std::string SuperClassName;
+    if (SuperClassDecl) {
+      SuperClassName = SuperClassDecl->getNameAsString();
+      classFields.add(MakeConstantString(SuperClassName));
+    } else
+      classFields.addNullPointer(PtrTy);
+    // const char *name;
+    classFields.add(classNameConstant);
+    // long version;
+    classFields.addInt(LongTy, 0);
+    // unsigned long info;
+    // objc_class_flag_meta & objc_class_flag_new_abi
+    // FIXME: It probably doesn't make sense to set objc_class_flag_new_abi,
+    // because these are all from a new entry point and the runtime will
+    // auto-upgrade older class structures.
+    classFields.addInt(LongTy, 0x10L);
+    // long instance_size;
+    int superInstanceSize = !SuperClassDecl ? 0 :
+      Context.getASTObjCInterfaceLayout(SuperClassDecl).getSize().getQuantity();
+    // Instance size is negative for classes that have not yet had their ivar
+    // layout calculated.
+    classFields.addInt(LongTy,
+      0 - (Context.getASTObjCImplementationLayout(OID).getSize().getQuantity() -
+      superInstanceSize));
+
+    if (classDecl->all_declared_ivar_begin() == nullptr)
+      classFields.addNullPointer(PtrTy);
+    else {
+      int ivar_count = 0;
+      for (const ObjCIvarDecl *IVD = classDecl->all_declared_ivar_begin(); IVD;
+           IVD = IVD->getNextIvar()) ivar_count++;
+      llvm::DataLayout td(&TheModule);
+      // struct objc_ivar_list *ivars;
+      ConstantInitBuilder b(CGM);
+      auto ivarListBuilder = b.beginStruct();
+      // int count;
+      ivarListBuilder.addInt(IntTy, classDecl->ivar_size());
+      // size_t size;
+      llvm::StructType *ObjCIvarTy = llvm::StructType::get(
+        PtrToInt8Ty,
+        PtrToInt8Ty,
+        PtrToInt8Ty,
+        Int32Ty,
+        Int32Ty);
+      ivarListBuilder.addInt(SizeTy, td.getTypeSizeInBits(ObjCIvarTy) /
+          CGM.getContext().getCharWidth());
+      // struct objc_ivar ivars[]
+      auto ivarArrayBuilder = ivarListBuilder.beginArray();
+      // Get te size of the superclass, so that we can calculate all ivar
+      // offsets relative to that.
+      for (const ObjCIvarDecl *IVD = classDecl->all_declared_ivar_begin(); IVD;
+           IVD = IVD->getNextIvar()) {
+        auto ivarTy = IVD->getType();
+        auto ivarBuilder = ivarArrayBuilder.beginStruct();
+        // const char *name;
+        ivarBuilder.add(MakeConstantString(IVD->getNameAsString()));
+        // const char *type;
+        std::string TypeStr;
+        Context.getObjCEncodingForType(ivarTy, TypeStr, IVD);
+        ivarBuilder.add(MakeConstantString(TypeStr));
+        // int *offset;
+        uint64_t BaseOffset = ComputeIvarBaseOffset(CGM, OID, IVD);
+        uint64_t Offset = BaseOffset - superInstanceSize;
+        llvm::Constant *OffsetValue = llvm::ConstantInt::get(IntTy, Offset);
+        std::string OffsetName = GetIVarOffsetVariableName(classDecl, IVD);
+        llvm::GlobalVariable *OffsetVar = TheModule.getGlobalVariable(OffsetName);
+        if (OffsetVar)
+          OffsetVar->setInitializer(OffsetValue);
+        else
+          OffsetVar = new llvm::GlobalVariable(TheModule, IntTy,
+            false, llvm::GlobalValue::ExternalLinkage,
+            OffsetValue, OffsetName);
+        ivarBuilder.add(OffsetVar);
+        ivarBuilder.addInt(Int32Ty, Context.getTypeAlign(ivarTy) / 8);
+        // flags
+        ivarBuilder.add(
+            FlagsForOwnership(ivarTy.getQualifiers().getObjCLifetime()));
+        ivarBuilder.finishAndAddTo(ivarArrayBuilder);
+      }
+      ivarArrayBuilder.finishAndAddTo(ivarListBuilder);
+      auto ivarList = ivarListBuilder.finishAndCreateGlobal(".objc_ivar_list",
+          CGM.getPointerAlign(), /*constant*/ false, 
+          llvm::GlobalValue::PrivateLinkage);
+      classFields.add(ivarList);
+    }
+    // struct objc_method_list *methods
+    auto method_count = std::distance(OID->instmeth_begin(), OID->instmeth_end());
+    for (auto *propImpl : OID->property_impls())
+      if (propImpl->getPropertyImplementation() ==
+          ObjCPropertyImplDecl::Synthesize) {
+        ObjCPropertyDecl *prop = propImpl->getPropertyDecl();
+        if (prop->getGetterMethodDecl())
+          method_count++;
+        if (prop->getSetterMethodDecl())
+          method_count++;
+      }
+
+    if (method_count == 0)
+      classFields.addNullPointer(PtrTy);
+    else {
+      ConstantInitBuilder b(CGM);
+      auto methodListBuilder = b.beginStruct();
+      auto methods =  OID->instance_methods();
+      // struct objc_method_list *next;
+      methodListBuilder.addNullPointer(PtrTy);
+      // int count;
+      methodListBuilder.addInt(IntTy, method_count);
+      auto methodArrayBuilder = methodListBuilder.beginArray();
+
+      auto addMethod = [&](const ObjCMethodDecl *method) {
+        if (!method)
+          return;
+        auto methodBuilder = methodArrayBuilder.beginStruct();
+        // SEL selector
+        methodBuilder.add(GetConstantSelector(method->getSelector(),
+              Context.getObjCEncodingForMethodDecl(method)));
+        // const char *types;
+        methodBuilder.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(method,
+              true)));
+        // IMP imp;
+        llvm::Constant *FnPtr =
+          TheModule.getFunction(SymbolNameForMethod(className, "",
+                                                    method->getSelector(),
+                                                    /*isClassMethod*/false));
+        assert(FnPtr && "Can't generate metadata for method that doesn't exist");
+        methodBuilder.addBitCast(FnPtr, IMPTy);
+        methodBuilder.finishAndAddTo(methodArrayBuilder);
+      };
+
+      for (const auto *method : methods) {
+        addMethod(method);
+      }
+      for (auto *propImpl : OID->property_impls()) {
+        if (propImpl->getPropertyImplementation() ==
+            ObjCPropertyImplDecl::Synthesize) {
+          ObjCPropertyDecl *prop = propImpl->getPropertyDecl();
+          addMethod(prop->getGetterMethodDecl());
+          addMethod(prop->getSetterMethodDecl());
+        }
+      }
+      methodArrayBuilder.finishAndAddTo(methodListBuilder);
+      auto methodList = methodListBuilder.finishAndCreateGlobal(".objc_method_list",
+          CGM.getPointerAlign(), /*constant*/ false, 
+          llvm::GlobalValue::PrivateLinkage);
+      classFields.add(methodList);
+    }
+    // void *dtable;
+    classFields.addNullPointer(PtrTy);
+    // struct objc_class *subclass_list
+    classFields.addNullPointer(PtrTy);
+    // struct objc_class *sibling_class
+    classFields.addNullPointer(PtrTy);
+    // struct objc_protocol_list *protocols;
+    SmallVector<llvm::Constant*, 16> Protocols;
+    for (const auto *I : classDecl->protocols())
+      Protocols.push_back(cast<llvm::Constant>(GenerateProtocolRef(I)));
+    if (Protocols.empty())
+      classFields.addNullPointer(PtrTy);
+    else
+      classFields.add(GenerateProtocolList(Protocols));
+    // struct reference_list *extra_data;
+    classFields.addNullPointer(PtrTy);
+    // long abi_version;
+    classFields.addInt(LongTy, 0);
+    // struct objc_property_list *properties
+    SmallVector<Selector, 16> InstanceMethodSels;
+    SmallVector<llvm::Constant*, 16> InstanceMethodTypes;
+    for (const auto *I : OID->instance_methods()) {
+      InstanceMethodSels.push_back(I->getSelector());
+      std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
+      InstanceMethodTypes.push_back(MakeConstantString(TypeStr));
+    }
+    classFields.add(GeneratePropertyList(OID, InstanceMethodSels,
+            InstanceMethodTypes));
+    // FIXME: We should add class properties here.
+    classFields.addNullPointer(PtrTy);
+
+    auto *classStruct = classFields.finishAndCreateGlobal("_OBJC_CLASS_"
+        + className, CGM.getPointerAlign());
+
+    if (CGM.getTriple().isOSBinFormatCOFF()) {
+      auto Storage = llvm::GlobalValue::DefaultStorageClass;
+      if (OID->getClassInterface()->hasAttr<DLLImportAttr>())
+        Storage = llvm::GlobalValue::DLLImportStorageClass;
+      else if (OID->getClassInterface()->hasAttr<DLLExportAttr>())
+        Storage = llvm::GlobalValue::DLLExportStorageClass;
+      cast<llvm::GlobalValue>(classStruct)->setDLLStorageClass(Storage);
+    }
+
+    auto *classRefSymbol = GetClassVar(className);
+    classRefSymbol->setSection(ClsRefSection);
+    classRefSymbol->setInitializer(llvm::ConstantExpr::getBitCast(classStruct, IdTy));
+
+
+    // Resolve the class aliases, if they exist.
+    if (ClassPtrAlias) {
+      ClassPtrAlias->replaceAllUsesWith(
+          llvm::ConstantExpr::getBitCast(classStruct, IdTy));
+      ClassPtrAlias->eraseFromParent();
+      ClassPtrAlias = nullptr;
+    }
+    if (MetaClassPtrAlias) {
+      MetaClassPtrAlias->replaceAllUsesWith(
+          llvm::ConstantExpr::getBitCast(metaclass, IdTy));
+      MetaClassPtrAlias->eraseFromParent();
+      MetaClassPtrAlias = nullptr;
+    }
+
+    // Add class structure to list to be added to the symtab later
+    Classes.push_back(classStruct);
   }
   public:
     CGObjCGNUstep2(CodeGenModule &Mod) : CGObjCGNUstep(Mod, 10, 3, 2) {
@@ -1279,16 +1653,6 @@ void CGObjCGNU::EmitClassRef(const std::string &className) {
   }
   new llvm::GlobalVariable(TheModule, ClassSymbol->getType(), true,
     llvm::GlobalValue::WeakAnyLinkage, ClassSymbol, symbolRef);
-}
-
-static std::string SymbolNameForMethod( StringRef ClassName,
-     StringRef CategoryName, const Selector MethodName,
-    bool isClassMethod) {
-  std::string MethodNameColonStripped = MethodName.getAsString();
-  std::replace(MethodNameColonStripped.begin(), MethodNameColonStripped.end(),
-      ':', '_');
-  return (Twine(isClassMethod ? "_c_" : "_i_") + ClassName + "_" +
-    CategoryName + "_" + MethodNameColonStripped).str();
 }
 
 CGObjCGNU::CGObjCGNU(CodeGenModule &cgm, unsigned runtimeABIVersion,
@@ -2481,7 +2845,47 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   if (1) { // FIXME: Flag only set for GS2
     SmallVector<Selector, 8> Sels;
     SmallVector<llvm::Constant*, 8> Types;
-    Elements.addBitCast( GeneratePropertyList(OCD, Sels, Types), PtrTy);
+    auto numProperties = std::distance(CatDecl->prop_begin(), CatDecl->prop_end());
+    if (numProperties == 0)
+      Elements.addNullPointer(PtrTy);
+    else  {
+      ASTContext &Context = CGM.getContext();
+      ConstantInitBuilder builder(CGM);
+      auto propertyList = builder.beginStruct();
+      // int count;
+      propertyList.addInt(IntTy, numProperties);
+      // struct objc_property_list *next;
+      propertyList.add(NULLPtr);
+      // struct objc_property properties[]
+      auto properties = propertyList.beginArray();
+      for (auto *property : CatDecl->properties()) {
+        auto fields = properties.beginStruct();
+        fields.add(MakePropertyEncodingString(property, OCD));
+        // FIXME: It would be nice to get the @dynamic property here, but
+        // there's currently no good way of doing it.
+        PushPropertyAttributes(fields, property, false, false);
+        auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
+          if (accessor) {
+            std::string TypeStr = Context.getObjCEncodingForMethodDecl(accessor);
+            llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
+            fields.add(MakeConstantString(accessor->getSelector().getAsString()));
+            fields.add(TypeEncoding);
+          } else {
+            fields.add(NULLPtr);
+            fields.add(NULLPtr);
+          }
+        };
+        addPropertyMethod(property->getGetterMethodDecl());
+        addPropertyMethod(property->getSetterMethodDecl());
+        fields.finishAndAddTo(properties);
+      }
+      properties.finishAndAddTo(propertyList);
+
+      Elements.add(propertyList.finishAndCreateGlobal(".objc_property_list",
+                                                      CGM.getPointerAlign()));
+    }
+    // FIXME: Class properties.
+    Elements.addNullPointer(PtrTy);
   }
 
   Categories.push_back(llvm::ConstantExpr::getBitCast(
@@ -2507,6 +2911,8 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
     (void) propertyImpl;
     numProperties++;
   }
+  if (numProperties == 0)
+    return NULLPtr;
 
   ConstantInitBuilder builder(CGM);
   auto propertyList = builder.beginStruct();
@@ -2632,6 +3038,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
       // Create the direct offset value
       std::string OffsetName = "__objc_ivar_offset_value_" + ClassName +"." +
           IVD->getNameAsString();
+
       llvm::GlobalVariable *OffsetVar = TheModule.getGlobalVariable(OffsetName);
       if (OffsetVar) {
         OffsetVar->setInitializer(OffsetValue);
@@ -2640,7 +3047,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
         // copy.
         OffsetVar->setLinkage(llvm::GlobalValue::ExternalLinkage);
       } else
-        OffsetVar = new llvm::GlobalVariable(TheModule, IntTy,
+        OffsetVar = new llvm::GlobalVariable(TheModule, Int32Ty,
           false, llvm::GlobalValue::ExternalLinkage,
           OffsetValue, OffsetName);
       IvarOffsets.push_back(OffsetValue);
@@ -2726,8 +3133,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   unsigned ivarIndex = 0;
   for (const ObjCIvarDecl *IVD = ClassDecl->all_declared_ivar_begin(); IVD;
        IVD = IVD->getNextIvar()) {
-      const std::string Name = "__objc_ivar_offset_" + ClassName + '.'
-          + IVD->getNameAsString();
+      const std::string Name = GetIVarOffsetVariableName(ClassDecl, IVD);
       offsetPointerIndexes[2] = llvm::ConstantInt::get(IndexTy, ivarIndex);
       // Get the correct ivar field
       llvm::Constant *offsetValue = llvm::ConstantExpr::getGetElementPtr(
@@ -2741,12 +3147,10 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
         // different modules will use this one, rather than their private
         // copy.
         offset->setLinkage(llvm::GlobalValue::ExternalLinkage);
-      } else {
+      } else
         // Add a new alias if there isn't one already.
-        offset = new llvm::GlobalVariable(TheModule, offsetValue->getType(),
+        new llvm::GlobalVariable(TheModule, offsetValue->getType(),
                 false, llvm::GlobalValue::ExternalLinkage, offsetValue, Name);
-        (void) offset; // Silence dead store warning.
-      }
       ++ivarIndex;
   }
   llvm::Constant *ZeroPtr = llvm::ConstantInt::get(IntPtrTy, 0);
@@ -3205,8 +3609,7 @@ void CGObjCGNU::EmitGCMemmoveCollectable(CodeGenFunction &CGF,
 llvm::GlobalVariable *CGObjCGNU::ObjCIvarOffsetVariable(
                               const ObjCInterfaceDecl *ID,
                               const ObjCIvarDecl *Ivar) {
-  const std::string Name = "__objc_ivar_offset_" + ID->getNameAsString()
-    + '.' + Ivar->getNameAsString();
+  const std::string Name = GetIVarOffsetVariableName(ID, Ivar);
   // Emit the variable and initialize it with what we think the correct value
   // is.  This allows code compiled with non-fragile ivars to work correctly
   // when linked against code which isn't (most of the time).
