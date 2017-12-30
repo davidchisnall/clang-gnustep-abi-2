@@ -1294,6 +1294,14 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       // int count;
       methodListBuilder.addInt(IntTy, std::distance(OID->classmeth_begin(),
                                                     OID->classmeth_end()));
+      // size_t size;
+      llvm::StructType *MethodTy = llvm::StructType::get(
+        PtrTy,
+        PtrTy,
+        PtrTy);
+      llvm::DataLayout td(&TheModule);
+      methodListBuilder.addInt(SizeTy, td.getTypeSizeInBits(MethodTy) /
+          CGM.getContext().getCharWidth());
       auto methodArrayBuilder = methodListBuilder.beginArray();
       for (const auto *I : OID->class_methods()) {
         auto methodBuilder = methodArrayBuilder.beginStruct();
@@ -1451,8 +1459,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       methodListBuilder.addNullPointer(PtrTy);
       // int count;
       methodListBuilder.addInt(IntTy, method_count);
+      // size_t size;
+      llvm::StructType *MethodTy = llvm::StructType::get(
+        PtrTy,
+        PtrTy,
+        PtrTy);
+      llvm::DataLayout td(&TheModule);
+      methodListBuilder.addInt(SizeTy, td.getTypeSizeInBits(MethodTy) /
+          CGM.getContext().getCharWidth());
       auto methodArrayBuilder = methodListBuilder.beginArray();
-
       auto addMethod = [&](const ObjCMethodDecl *method) {
         if (!method)
           return;
@@ -2303,6 +2318,14 @@ GenerateMethodList(StringRef ClassName,
       PtrToInt8Ty, // Method types
       IMPTy        // Method pointer
     });
+  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
+  if (ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0))) {
+    // size_t size;
+    llvm::DataLayout td(&TheModule);
+    MethodList.addInt(SizeTy, td.getTypeSizeInBits(ObjCMethodTy) /
+        CGM.getContext().getCharWidth());
+  }
   auto Methods = MethodList.beginArray();
   for (unsigned int i = 0, e = MethodTypes.size(); i < e; ++i) {
     llvm::Constant *FnPtr =
@@ -2842,7 +2865,9 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
           PtrTy);
   // Protocol list
   Elements.addBitCast(GenerateProtocolList(Protocols), PtrTy);
-  if (1) { // FIXME: Flag only set for GS2
+  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
+  if (ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0))) {
     SmallVector<Selector, 8> Sels;
     SmallVector<llvm::Constant*, 8> Types;
     auto numProperties = std::distance(CatDecl->prop_begin(), CatDecl->prop_end());
