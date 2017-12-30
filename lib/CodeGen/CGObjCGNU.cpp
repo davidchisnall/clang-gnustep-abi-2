@@ -1076,6 +1076,25 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     const std::string &TypeEncoding) override {
     return GetConstantSelector(Sel, TypeEncoding);
   }
+  llvm::Constant  *GetTypeString(llvm::StringRef TypeEncoding) {
+    if (TypeEncoding.empty())
+      return NULLPtr;
+    std::string MangledTypes = TypeEncoding;
+    std::replace(MangledTypes.begin(), MangledTypes.end(),
+      '@', '\1');
+    std::string TypesVarName = ".objc_sel_types_" + MangledTypes;
+    auto *TypesGlobal = TheModule.getGlobalVariable(TypesVarName);
+    if (!TypesGlobal) {
+      llvm::Constant *Init = llvm::ConstantDataArray::getString(VMContext,
+          TypeEncoding);
+      auto *GV = new llvm::GlobalVariable(TheModule, Init->getType(),
+          true, llvm::GlobalValue::LinkOnceODRLinkage, Init, TypesVarName);
+      GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+      TypesGlobal = GV;
+    }
+    return llvm::ConstantExpr::getGetElementPtr(TypesGlobal->getValueType(),
+        TypesGlobal, Zeros);
+  }
   llvm::Constant *GetConstantSelector(Selector Sel, const std::string &TypeEncoding) {
     // @ is used as a special character in symbol names (used for symbol
     // versioning), so mangle the name to not include it.  Replace it with a
@@ -1089,21 +1108,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     if (auto *GV = TheModule.getNamedGlobal(SelVarName))
       return EnforceType(GV, SelectorTy);
     auto *Name = ExportUniqueString(Sel.getAsString(), ".objc_sel_name_", true);
-    llvm::Constant *Types = llvm::ConstantPointerNull::get(PtrTy);
-    if (TypeEncoding.size() > 0) {
-      std::string TypesVarName = ".objc_sel_types_" + MangledTypes;
-      auto *TypesGlobal = TheModule.getGlobalVariable(TypesVarName);
-      if (!TypesGlobal) {
-        llvm::Constant *Init = llvm::ConstantDataArray::getString(VMContext,
-            TypeEncoding);
-        auto *GV = new llvm::GlobalVariable(TheModule, Init->getType(),
-            true, llvm::GlobalValue::LinkOnceODRLinkage, Init, TypesVarName);
-        GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
-        TypesGlobal = GV;
-      }
-      Types = llvm::ConstantExpr::getGetElementPtr(TypesGlobal->getValueType(),
-          TypesGlobal, Zeros);
-    }
+    llvm::Constant *Types = GetTypeString(TypeEncoding);
     auto *GV = EmitRuntimeStruct(SelVarName, {Name, Types},
         llvm::GlobalValue::ExternalLinkage, true, SelSection);
     auto *SelVal = EnforceType(GV, SelectorTy);
@@ -1309,7 +1314,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         methodBuilder.add(GetConstantSelector(I->getSelector(),
               Context.getObjCEncodingForMethodDecl(I)));
         // const char *types;
-        methodBuilder.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(I,
+        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(I,
               true)));
         // IMP imp;
         llvm::Constant *FnPtr =
@@ -1476,7 +1481,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         methodBuilder.add(GetConstantSelector(method->getSelector(),
               Context.getObjCEncodingForMethodDecl(method)));
         // const char *types;
-        methodBuilder.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(method,
+        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(method,
               true)));
         // IMP imp;
         llvm::Constant *FnPtr =
@@ -1524,13 +1529,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // long abi_version;
     classFields.addInt(LongTy, 0);
     // struct objc_property_list *properties
-    SmallVector<Selector, 16> InstanceMethodSels;
-    SmallVector<llvm::Constant*, 16> InstanceMethodTypes;
-    for (const auto *I : OID->instance_methods()) {
-      InstanceMethodSels.push_back(I->getSelector());
-      std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
-      InstanceMethodTypes.push_back(MakeConstantString(TypeStr));
-    }
+    SmallVector<Selector, 1> InstanceMethodSels;
+    SmallVector<llvm::Constant*, 1> InstanceMethodTypes;
     classFields.add(GeneratePropertyList(OID, InstanceMethodSels,
             InstanceMethodTypes));
     // FIXME: We should add class properties here.
