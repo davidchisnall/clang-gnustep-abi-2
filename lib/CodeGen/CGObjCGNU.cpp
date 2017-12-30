@@ -1088,10 +1088,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       MangledTypes).str();
     if (auto *GV = TheModule.getNamedGlobal(SelVarName))
       return EnforceType(GV, SelectorTy);
-    auto *Name = ExportUniqueString(Sel.getAsString(), ".objc_sel_name", true);
+    auto *Name = ExportUniqueString(Sel.getAsString(), ".objc_sel_name_", true);
     llvm::Constant *Types = llvm::ConstantPointerNull::get(PtrTy);
     if (TypeEncoding.size() > 0) {
-      std::string TypesVarName = ".objc_sel_types" + MangledTypes;
+      std::string TypesVarName = ".objc_sel_types_" + MangledTypes;
       auto *TypesGlobal = TheModule.getGlobalVariable(TypesVarName);
       if (!TypesGlobal) {
         llvm::Constant *Init = llvm::ConstantDataArray::getString(VMContext,
