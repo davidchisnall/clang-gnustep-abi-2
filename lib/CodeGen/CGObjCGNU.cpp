@@ -2545,7 +2545,9 @@ CGObjCGNU::GenerateProtocolList(ArrayRef<std::string> Protocols) {
 
 llvm::Value *CGObjCGNU::GenerateProtocolRef(CodeGenFunction &CGF,
                                             const ObjCProtocolDecl *PD) {
-  llvm::Value *protocol = ExistingProtocols[PD->getNameAsString()];
+  llvm::Constant *&protocol = ExistingProtocols[PD->getNameAsString()];
+  if (!protocol)
+    GenerateProtocol(PD);
   llvm::Type *T =
     CGM.getTypes().ConvertType(CGM.getContext().getObjCProtoType());
   return CGF.Builder.CreateBitCast(protocol, llvm::PointerType::getUnqual(T));
