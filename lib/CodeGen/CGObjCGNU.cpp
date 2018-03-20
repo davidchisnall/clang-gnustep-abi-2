@@ -1285,7 +1285,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   llvm::Value *EmitIvarOffset(CodeGenFunction &CGF,
                               const ObjCInterfaceDecl *Interface,
                               const ObjCIvarDecl *Ivar) override {
-    const std::string Name = GetIVarOffsetVariableName(Interface, Ivar);
+    const std::string Name = GetIVarOffsetVariableName(Ivar->getContainingInterface(), Ivar);
     // Emit the variable and initialize it with what we think the correct value
     // is.  This allows code compiled with non-fragile ivars to work correctly
     // when linked against code which isn't (most of the time).
