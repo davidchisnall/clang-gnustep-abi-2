@@ -177,8 +177,13 @@ protected:
   unsigned msgSendMDKind;
 
   std::string SymbolForProtocol(StringRef Name) {
-    return (StringRef("__OBJC_PROTOCOL_") + Name).str();
+    return (StringRef("._OBJC_PROTOCOL_") + Name).str();
   }
+
+  std::string SymbolForProtocolRef(StringRef Name) {
+    return (StringRef("._OBJC_PROTOCOL_REF_") + Name).str();
+  }
+
 
   /// Helper function that generates a constant string and returns a pointer to
   /// the start of the string.  The result of this function can be used anywhere
@@ -828,6 +833,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   const char *const CatSection = "__objc_cats";
   /// The section for protocols.
   const char *const ProtocolSection = "__objc_protocols";
+  /// The section for protocol references.
+  const char *const ProtocolRefSection = "__objc_protocol_refs";
   /// A flag indicating if we've emitted at least one protocol.
   /// If we haven't, then we need to emit an empty protocol, to ensure that the
   /// __start__objc_protocols and __stop__objc_protocols sections exist.
@@ -980,13 +987,29 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     }
     return llvm::ConstantExpr::getBitCast(GV, ProtocolPtrTy);
   }
-  llvm::Value *GenerateProtocolRef(const ObjCProtocolDecl *PD) {
-    return GenerateEmptyProtocol(PD->getNameAsString());
-  }
+
+  /// Existing protocol references.
+  llvm::StringMap<llvm::Constant*> ExistingProtocolRefs;
 
   llvm::Value *GenerateProtocolRef(CodeGenFunction &CGF,
                                    const ObjCProtocolDecl *PD) override {
-    return GenerateProtocolRef(PD);
+    auto Name = PD->getNameAsString();
+    auto *Ref = ExistingProtocolRefs[Name];
+    if (!Ref) {
+      auto *&Protocol = ExistingProtocols[Name];
+      if (!Protocol)
+        Ref = GenerateProtocolRef(PD);
+      std::string RefName = SymbolForProtocolRef(Name);
+      assert(!TheModule.getGlobalVariable(RefName));
+      // Emit a reference symbol.
+      auto GV = new llvm::GlobalVariable(TheModule, ProtocolPtrTy,
+          false, llvm::GlobalValue::ExternalLinkage,
+          llvm::ConstantExpr::getBitCast(Protocol, ProtocolPtrTy), Name);
+      GV->setSection(ProtocolRefSection);
+      GV->setAlignment(CGM.getPointerAlign().getQuantity());
+      Ref = GV;
+    }
+    return CGF.Builder.CreateAlignedLoad(Ref, CGM.getPointerAlign());
   }
   template<class T>
   void EmitProtocolMethodList(T &&Methods, llvm::Constant *&Required,
@@ -1023,8 +1046,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   }
 
   void GenerateProtocol(const ObjCProtocolDecl *PD) override {
-    EmittedProtocol = true;
+    // Do nothing - we only emit referenced protocols.
+  }
+  llvm::Constant *GenerateProtocolRef(const ObjCProtocolDecl *PD) {
     std::string ProtocolName = PD->getNameAsString();
+    auto *&Protocol = ExistingProtocols[ProtocolName];
+    if (Protocol)
+      return Protocol;
+
+    EmittedProtocol = true;
     
     // Use the protocol definition, if there is one.
     if (const ObjCProtocolDecl *Def = PD->getDefinition())
@@ -1032,7 +1062,9 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
 
     SmallVector<llvm::Constant*, 16> Protocols;
     for (const auto *PI : PD->protocols())
-      Protocols.push_back(cast<llvm::Constant>(GenerateProtocolRef(PI)));
+      Protocols.push_back(
+          llvm::ConstantExpr::getBitCast(GenerateProtocolRef(PI),
+            ProtocolPtrTy));
     llvm::Constant *ProtocolList = GenerateProtocolList(Protocols);
 
     // Collect information about methods
@@ -1058,14 +1090,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       ClassMethodList, OptionalInstanceMethodList, OptionalClassMethodList,
       PropertyList, OptionalPropertyList}, llvm::GlobalValue::ExternalLinkage,
       true, ProtocolSection);
-    GV->setAlignment(4);
-    CGM.addUsedGlobal(GV);
+    GV->setAlignment(CGM.getPointerAlign().getQuantity());
     if (OldGV) {
       OldGV->replaceAllUsesWith(llvm::ConstantExpr::getBitCast(GV,
             OldGV->getType()));
       OldGV->removeFromParent();
       GV->setName(SymName);
     }
+    Protocol = GV;
+    return GV;
   }
   llvm::Constant *EnforceType(llvm::Constant *Val, llvm::Type *Ty) {
     if (Val->getType() == Ty)
@@ -1151,10 +1184,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     auto *CatEnd = GetSectionStop(CatSection);
     auto *ProtocolStart = GetSectionStart(ProtocolSection);
     auto *ProtocolEnd = GetSectionStop(ProtocolSection);
+    auto *ProtocolRefStart = GetSectionStart(ProtocolRefSection);
+    auto *ProtocolRefEnd = GetSectionStop(ProtocolRefSection);
     auto *InitStruct = EmitRuntimeStruct(".objc_init",
         {llvm::ConstantInt::get(Int64Ty, 0), SelStart, SelEnd, ClsStart,
         ClsEnd, ClsRefStart, ClsRefEnd, CatStart, CatEnd, ProtocolStart,
-        ProtocolEnd},
+        ProtocolEnd, ProtocolRefStart, ProtocolRefEnd},
         llvm::GlobalValue::LinkOnceODRLinkage, true);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
     CallRuntimeFunction(B, "__objc_load", {InitStruct});;
@@ -1215,11 +1250,20 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       Cls->setSection(ClsSection);
       CGM.addUsedGlobal(Cls);
     }
-    auto *NullProto = EmitRuntimeStruct(".objc_null_protocol", {NULLPtr, NULLPtr, NULLPtr,
-          NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
-          llvm::GlobalValue::ExternalLinkage, true, ProtocolSection);
-    NullProto->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    NullProto->setAlignment(CGM.getPointerAlign().getQuantity());
+    if (!EmittedProtocol)
+    {
+      auto *NullProto = EmitRuntimeStruct(".objc_null_protocol", {NULLPtr, NULLPtr, NULLPtr,
+            NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
+            llvm::GlobalValue::ExternalLinkage, true, ProtocolSection);
+      NullProto->setAlignment(CGM.getPointerAlign().getQuantity());
+      auto NullProtoRef = new llvm::GlobalVariable(TheModule, PtrTy,
+          false, llvm::GlobalValue::ExternalLinkage,
+          NULLPtr, ".objc_null_protocol_ref");
+      NullProtoRef->setComdat(TheModule.getOrInsertComdat(".objc_null_protocol_ref"));
+      NullProtoRef->setVisibility(llvm::GlobalValue::HiddenVisibility);
+      NullProtoRef->setSection(ProtocolRefSection);
+      NullProtoRef->setAlignment(CGM.getPointerAlign().getQuantity());
+    }
     ConstantStrings.clear();
     Categories.clear();
     Classes.clear();
@@ -1519,7 +1563,9 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // struct objc_protocol_list *protocols;
     SmallVector<llvm::Constant*, 16> Protocols;
     for (const auto *I : classDecl->protocols())
-      Protocols.push_back(cast<llvm::Constant>(GenerateProtocolRef(I)));
+      Protocols.push_back(
+          llvm::ConstantExpr::getBitCast(GenerateProtocolRef(I),
+            ProtocolPtrTy));
     if (Protocols.empty())
       classFields.addNullPointer(PtrTy);
     else
