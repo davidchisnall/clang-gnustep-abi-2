@@ -2990,6 +2990,13 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
   ConstantInitBuilder builder(CGM);
   auto propertyList = builder.beginStruct();
   propertyList.addInt(IntTy, numProperties);
+  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
+  if (ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0))) {
+    llvm::DataLayout td(&TheModule);
+    propertyList.addInt(IntTy, td.getTypeSizeInBits(propertyMetadataTy) /
+        CGM.getContext().getCharWidth());
+  }
   propertyList.add(NULLPtr);
   auto properties = propertyList.beginArray(propertyMetadataTy);
 
