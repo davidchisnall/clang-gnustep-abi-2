@@ -839,6 +839,11 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   /// If we haven't, then we need to emit an empty protocol, to ensure that the
   /// __start__objc_protocols and __stop__objc_protocols sections exist.
   bool EmittedProtocol = false;
+  /// A flag indicating if we've emitted at least one protocol reference.
+  /// If we haven't, then we need to emit an empty protocol, to ensure that the
+  /// __start__objc_protocol_refs and __stop__objc_protocol_refs sections
+  /// exist.
+  bool EmittedProtocolRef = false;
   /// Generate the name of a symbol for a reference to a class.  Accesses to
   /// classes should be indirected via this.
   std::string SymbolForClassRef(StringRef Name) {
@@ -1009,6 +1014,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       GV->setAlignment(CGM.getPointerAlign().getQuantity());
       Ref = GV;
     }
+    EmittedProtocolRef = true;
     return CGF.Builder.CreateAlignedLoad(Ref, CGM.getPointerAlign());
   }
   template<class T>
@@ -1254,18 +1260,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       Cls->setSection(ClsSection);
       CGM.addUsedGlobal(Cls);
     }
-    if (!EmittedProtocol)
-    {
+    if (!EmittedProtocol) {
       auto *NullProto = EmitRuntimeStruct(".objc_null_protocol", {NULLPtr, NULLPtr, NULLPtr,
             NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
             llvm::GlobalValue::ExternalLinkage, true, ProtocolSection);
       NullProto->setAlignment(CGM.getPointerAlign().getQuantity());
-      auto NullProtoRef = new llvm::GlobalVariable(TheModule, PtrTy,
-          false, llvm::GlobalValue::ExternalLinkage,
-          NULLPtr, ".objc_null_protocol_ref");
-      NullProtoRef->setComdat(TheModule.getOrInsertComdat(".objc_null_protocol_ref"));
-      NullProtoRef->setVisibility(llvm::GlobalValue::HiddenVisibility);
-      NullProtoRef->setSection(ProtocolRefSection);
+    }
+    if (!EmittedProtocolRef) {
+      auto *NullProtoRef = EmitRuntimeStruct(".objc_null_protocol_ref", {NULLPtr},
+            llvm::GlobalValue::ExternalLinkage, true, ProtocolRefSection);
       NullProtoRef->setAlignment(CGM.getPointerAlign().getQuantity());
     }
     ConstantStrings.clear();
