@@ -1377,7 +1377,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         methodBuilder.finishAndAddTo(methodArrayBuilder);
       }
       methodArrayBuilder.finishAndAddTo(methodListBuilder);
-      auto methodList = methodListBuilder.finishAndCreateGlobal(".objc_ivar_list",
+      auto methodList = methodListBuilder.finishAndCreateGlobal(".objc_method_list",
           CGM.getPointerAlign(), /*constant*/ false, 
           llvm::GlobalValue::PrivateLinkage);
       metaclassFields.add(methodList);
