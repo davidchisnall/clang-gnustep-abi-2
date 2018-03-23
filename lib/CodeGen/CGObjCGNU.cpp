@@ -1384,6 +1384,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     }
     // void *dtable;
     metaclassFields.addNullPointer(PtrTy);
+    // IMP cxx_construct;
+    metaclassFields.addNullPointer(PtrTy);
+    // IMP cxx_destruct;
+    metaclassFields.addNullPointer(PtrTy);
     // struct objc_class *subclass_list
     metaclassFields.addNullPointer(PtrTy);
     // struct objc_class *sibling_class
@@ -1567,6 +1571,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       classFields.add(methodList);
     }
     // void *dtable;
+    classFields.addNullPointer(PtrTy);
+    // IMP cxx_construct;
+    classFields.addNullPointer(PtrTy);
+    // IMP cxx_destruct;
     classFields.addNullPointer(PtrTy);
     // struct objc_class *subclass_list
     classFields.addNullPointer(PtrTy);
