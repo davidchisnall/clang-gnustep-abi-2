@@ -1144,6 +1144,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     llvm::Constant *Types = GetTypeString(TypeEncoding);
     auto *GV = EmitRuntimeStruct(SelVarName, {Name, Types},
         llvm::GlobalValue::ExternalLinkage, true, SelSection);
+    GV->setComdat(TheModule.getOrInsertComdat(SelVarName));
+    GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
     auto *SelVal = EnforceType(GV, SelectorTy);
     return SelVal;
   }
