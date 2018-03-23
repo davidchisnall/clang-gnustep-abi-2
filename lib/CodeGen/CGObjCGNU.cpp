@@ -1168,9 +1168,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   llvm::Function *ModuleInitFunction() override {
     llvm::Function *LoadFunction = llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), false),
-      llvm::GlobalValue::LinkOnceODRLinkage, ".objcv2_load_function",
+      llvm::GlobalValue::ExternalLinkage, ".objcv2_load_function",
       &TheModule);
     LoadFunction->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    LoadFunction->setComdat(TheModule.getOrInsertComdat(".objcv2_load_function"));
 
     llvm::BasicBlock *EntryBB =
         llvm::BasicBlock::Create(VMContext, "entry", LoadFunction);
@@ -1192,8 +1193,9 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         {llvm::ConstantInt::get(Int64Ty, 0), SelStart, SelEnd, ClsStart,
         ClsEnd, ClsRefStart, ClsRefEnd, CatStart, CatEnd, ProtocolStart,
         ProtocolEnd, ProtocolRefStart, ProtocolRefEnd},
-        llvm::GlobalValue::LinkOnceODRLinkage, true);
+        llvm::GlobalValue::ExternalLinkage, true);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    InitStruct->setComdat(TheModule.getOrInsertComdat(".objc_init"));
     CallRuntimeFunction(B, "__objc_load", {InitStruct});;
     B.CreateRetVoid();
     // Make sure that the optimisers don't delete this function.
