@@ -1408,10 +1408,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // Get the superclass name.
     const ObjCInterfaceDecl * SuperClassDecl =
       OID->getClassInterface()->getSuperClass();
-    std::string SuperClassName;
     if (SuperClassDecl) {
-      SuperClassName = SuperClassDecl->getNameAsString();
-      classFields.add(MakeConstantString(SuperClassName));
+      auto SuperClassName = SymbolForClass(SuperClassDecl->getNameAsString());
+      llvm::Constant *SuperClass = TheModule.getNamedGlobal(SuperClassName);
+      if (!SuperClass)
+      {
+        SuperClass = new llvm::GlobalVariable(TheModule, PtrTy, false,
+            llvm::GlobalValue::ExternalLinkage, nullptr, SuperClassName);
+      }
+      classFields.add(llvm::ConstantExpr::getBitCast(SuperClass, PtrTy));
     } else
       classFields.addNullPointer(PtrTy);
     // const char *name;
@@ -1589,8 +1594,9 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // FIXME: We should add class properties here.
     classFields.addNullPointer(PtrTy);
 
-    auto *classStruct = classFields.finishAndCreateGlobal("_OBJC_CLASS_"
-        + className, CGM.getPointerAlign());
+    auto *classStruct =
+      classFields.finishAndCreateGlobal(SymbolForClass(className),
+        CGM.getPointerAlign(), false, llvm::GlobalValue::ExternalLinkage);
 
     if (CGM.getTriple().isOSBinFormatCOFF()) {
       auto Storage = llvm::GlobalValue::DefaultStorageClass;
@@ -1607,18 +1613,28 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
 
 
     // Resolve the class aliases, if they exist.
+    // FIXME: Class pointer aliases shouldn't exist!
     if (ClassPtrAlias) {
       ClassPtrAlias->replaceAllUsesWith(
           llvm::ConstantExpr::getBitCast(classStruct, IdTy));
       ClassPtrAlias->eraseFromParent();
       ClassPtrAlias = nullptr;
     }
+    if (auto Placeholder =
+        TheModule.getNamedGlobal(SymbolForClass(className)))
+      if (Placeholder != classStruct) {
+        Placeholder->replaceAllUsesWith(
+            llvm::ConstantExpr::getBitCast(classStruct, Placeholder->getType()));
+        Placeholder->eraseFromParent();
+        classStruct->setName(SymbolForClass(className));
+      }
     if (MetaClassPtrAlias) {
       MetaClassPtrAlias->replaceAllUsesWith(
           llvm::ConstantExpr::getBitCast(metaclass, IdTy));
       MetaClassPtrAlias->eraseFromParent();
       MetaClassPtrAlias = nullptr;
     }
+    assert(classStruct->getName() == SymbolForClass(className));
 
     // Add class structure to list to be added to the symtab later
     Classes.push_back(classStruct);
