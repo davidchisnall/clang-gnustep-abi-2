@@ -837,6 +837,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   const char *const ProtocolRefSection = "__objc_protocol_refs";
   /// The section for class aliases
   const char *const ClassAliasSection = "__objc_class_aliases";
+  /// The GCC ABI superclass message lookup function.  Takes a pointer to a
+  /// structure describing the receiver and the class, and a selector as
+  /// arguments.  Returns the IMP for the corresponding method.
+  LazyRuntimeFunction MsgLookupSuperFn;
   /// A flag indicating if we've emitted at least one protocol.
   /// If we haven't, then we need to emit an empty protocol, to ensure that the
   /// __start__objc_protocols and __stop__objc_protocols sections exist.
@@ -883,6 +887,16 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       GV->setSection(Section);
     return GV;
   }
+
+  llvm::Value *LookupIMPSuper(CodeGenFunction &CGF, Address ObjCSuper,
+                              llvm::Value *cmd, MessageSendInfo &MSI) override {
+    // Don't access the slot unless we're trying to cache the result.
+    CGBuilderTy &Builder = CGF.Builder;
+    llvm::Value *lookupArgs[] = {CGObjCGNU::EnforceType(Builder, ObjCSuper,
+        PtrToObjCSuperTy).getPointer(), cmd};
+    return CGF.EmitNounwindRuntimeCall(MsgLookupSuperFn, lookupArgs);
+  }
+
   llvm::GlobalVariable *GetClassVar(StringRef Name, bool isWeak=false) {
     std::string SymbolName = SymbolForClassRef(Name);
     auto *ClassSymbol = TheModule.getNamedGlobal(SymbolName);
@@ -1668,6 +1682,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   }
   public:
     CGObjCGNUstep2(CodeGenModule &Mod) : CGObjCGNUstep(Mod, 10, 3, 2) {
+      MsgLookupSuperFn.init(&CGM, "objc_msg_lookup_super", IMPTy,
+                            PtrToObjCSuperTy, SelectorTy);
     }
 
 };
