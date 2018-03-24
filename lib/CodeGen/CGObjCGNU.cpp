@@ -742,7 +742,7 @@ class CGObjCGNUstep : public CGObjCGNU {
       // Slot_t objc_msg_lookup_sender(id *receiver, SEL selector, id sender);
       SlotLookupFn.init(&CGM, "objc_msg_lookup_sender", SlotTy, PtrToIdTy,
                         SelectorTy, IdTy);
-      // Slot_t objc_msg_lookup_super(struct objc_super*, SEL);
+      // Slot_t objc_slot_lookup_super(struct objc_super*, SEL);
       SlotLookupSuperFn.init(&CGM, "objc_slot_lookup_super", SlotTy,
                              PtrToObjCSuperTy, SelectorTy);
       // If we're in ObjC++ mode, then we want to make 
