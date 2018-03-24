@@ -2167,54 +2167,69 @@ CGObjCGNU::GenerateMessageSendSuper(CodeGenFunction &CGF,
   MessageSendInfo MSI = getMessageSendInfo(Method, ResultType, ActualArgs);
 
   llvm::Value *ReceiverClass = nullptr;
-  if (isCategoryImpl) {
-    llvm::Constant *classLookupFunction = nullptr;
+  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
+  bool isV2ABI = ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0));
+  if (isV2ABI) {
+    ReceiverClass = GetClassNamed(CGF,
+        Class->getSuperClass()->getNameAsString(), /*isWeak*/false);
     if (IsClassMessage)  {
-      classLookupFunction = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
-            IdTy, PtrTy, true), "objc_get_meta_class");
-    } else {
-      classLookupFunction = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
-            IdTy, PtrTy, true), "objc_get_class");
+      // Load the isa pointer of the superclass is this is a class method.
+      ReceiverClass = Builder.CreateBitCast(ReceiverClass,
+                                            llvm::PointerType::getUnqual(IdTy));
+      ReceiverClass =
+        Builder.CreateAlignedLoad(ReceiverClass, CGF.getPointerAlign());
     }
-    ReceiverClass = Builder.CreateCall(classLookupFunction,
-        MakeConstantString(Class->getNameAsString()));
+    ReceiverClass = EnforceType(Builder, ReceiverClass, IdTy);
   } else {
-    // Set up global aliases for the metaclass or class pointer if they do not
-    // already exist.  These will are forward-references which will be set to
-    // pointers to the class and metaclass structure created for the runtime
-    // load function.  To send a message to super, we look up the value of the
-    // super_class pointer from either the class or metaclass structure.
-    if (IsClassMessage)  {
-      if (!MetaClassPtrAlias) {
-        MetaClassPtrAlias = llvm::GlobalAlias::create(
-            IdTy->getElementType(), 0, llvm::GlobalValue::InternalLinkage,
-            ".objc_metaclass_ref" + Class->getNameAsString(), &TheModule);
+    if (isCategoryImpl) {
+      llvm::Constant *classLookupFunction = nullptr;
+      if (IsClassMessage)  {
+        classLookupFunction = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
+              IdTy, PtrTy, true), "objc_get_meta_class");
+      } else {
+        classLookupFunction = CGM.CreateRuntimeFunction(llvm::FunctionType::get(
+              IdTy, PtrTy, true), "objc_get_class");
       }
-      ReceiverClass = MetaClassPtrAlias;
+      ReceiverClass = Builder.CreateCall(classLookupFunction,
+          MakeConstantString(Class->getNameAsString()));
     } else {
-      if (!ClassPtrAlias) {
-        ClassPtrAlias = llvm::GlobalAlias::create(
-            IdTy->getElementType(), 0, llvm::GlobalValue::InternalLinkage,
-            ".objc_class_ref" + Class->getNameAsString(), &TheModule);
+      // Set up global aliases for the metaclass or class pointer if they do not
+      // already exist.  These will are forward-references which will be set to
+      // pointers to the class and metaclass structure created for the runtime
+      // load function.  To send a message to super, we look up the value of the
+      // super_class pointer from either the class or metaclass structure.
+      if (IsClassMessage)  {
+        if (!MetaClassPtrAlias) {
+          MetaClassPtrAlias = llvm::GlobalAlias::create(
+              IdTy->getElementType(), 0, llvm::GlobalValue::InternalLinkage,
+              ".objc_metaclass_ref" + Class->getNameAsString(), &TheModule);
+        }
+        ReceiverClass = MetaClassPtrAlias;
+      } else {
+        if (!ClassPtrAlias) {
+          ClassPtrAlias = llvm::GlobalAlias::create(
+              IdTy->getElementType(), 0, llvm::GlobalValue::InternalLinkage,
+              ".objc_class_ref" + Class->getNameAsString(), &TheModule);
+        }
+        ReceiverClass = ClassPtrAlias;
       }
-      ReceiverClass = ClassPtrAlias;
     }
+    // Cast the pointer to a simplified version of the class structure
+    llvm::Type *CastTy = llvm::StructType::get(IdTy, IdTy);
+    ReceiverClass = Builder.CreateBitCast(ReceiverClass,
+                                          llvm::PointerType::getUnqual(CastTy));
+    // Get the superclass pointer
+    ReceiverClass = Builder.CreateStructGEP(CastTy, ReceiverClass, 1);
+    // Load the superclass pointer
+    ReceiverClass =
+      Builder.CreateAlignedLoad(ReceiverClass, CGF.getPointerAlign());
   }
-  // Cast the pointer to a simplified version of the class structure
-  llvm::Type *CastTy = llvm::StructType::get(IdTy, IdTy);
-  ReceiverClass = Builder.CreateBitCast(ReceiverClass,
-                                        llvm::PointerType::getUnqual(CastTy));
-  // Get the superclass pointer
-  ReceiverClass = Builder.CreateStructGEP(CastTy, ReceiverClass, 1);
-  // Load the superclass pointer
-  ReceiverClass =
-    Builder.CreateAlignedLoad(ReceiverClass, CGF.getPointerAlign());
   // Construct the structure used to look up the IMP
   llvm::StructType *ObjCSuperTy =
       llvm::StructType::get(Receiver->getType(), IdTy);
 
-  // FIXME: Is this really supposed to be a dynamic alloca?
-  Address ObjCSuper = Address(Builder.CreateAlloca(ObjCSuperTy),
+  Address ObjCSuper = CGF.CreateTempAlloca(ObjCSuperTy,
                               CGF.getPointerAlign());
 
   Builder.CreateStore(Receiver,
