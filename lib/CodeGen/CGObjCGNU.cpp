@@ -835,6 +835,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   const char *const ProtocolSection = "__objc_protocols";
   /// The section for protocol references.
   const char *const ProtocolRefSection = "__objc_protocol_refs";
+  /// The section for class aliases
+  const char *const ClassAliasSection = "__objc_class_aliases";
   /// A flag indicating if we've emitted at least one protocol.
   /// If we haven't, then we need to emit an empty protocol, to ensure that the
   /// __start__objc_protocols and __stop__objc_protocols sections exist.
@@ -1195,10 +1197,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     auto *ProtocolEnd = GetSectionStop(ProtocolSection);
     auto *ProtocolRefStart = GetSectionStart(ProtocolRefSection);
     auto *ProtocolRefEnd = GetSectionStop(ProtocolRefSection);
+    auto *ClassAliasStart = GetSectionStart(ClassAliasSection);
+    auto *ClassAliasEnd = GetSectionStop(ClassAliasSection);
     auto *InitStruct = EmitRuntimeStruct(".objc_init",
         {llvm::ConstantInt::get(Int64Ty, 0), SelStart, SelEnd, ClsStart,
         ClsEnd, ClsRefStart, ClsRefEnd, CatStart, CatEnd, ProtocolStart,
-        ProtocolEnd, ProtocolRefStart, ProtocolRefEnd},
+        ProtocolEnd, ProtocolRefStart, ProtocolRefEnd, ClassAliasStart,
+        ClassAliasEnd},
         llvm::GlobalValue::ExternalLinkage, true);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
     InitStruct->setComdat(TheModule.getOrInsertComdat(".objc_init"));
@@ -1270,6 +1275,20 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       auto *NullProtoRef = EmitRuntimeStruct(".objc_null_protocol_ref", {NULLPtr},
             llvm::GlobalValue::ExternalLinkage, true, ProtocolRefSection);
       NullProtoRef->setAlignment(CGM.getPointerAlign().getQuantity());
+    }
+    if (!ClassAliases.empty())
+      for (auto clsAlias : ClassAliases) {
+        auto alias = EmitRuntimeStruct(std::string(".objc_class_alias") +
+            clsAlias.second, { MakeConstantString(clsAlias.second),
+            GetClassVar(clsAlias.first) }, llvm::GlobalValue::ExternalLinkage,
+            true, ClassAliasSection);
+        alias->setAlignment(CGM.getPointerAlign().getQuantity());
+      }
+    else {
+      auto *NullClassRef = EmitRuntimeStruct(".objc_null_class_ref",
+        { NULLPtr, NULLPtr }, llvm::GlobalValue::ExternalLinkage, true,
+        ClassAliasSection );
+      NullClassRef->setAlignment(CGM.getPointerAlign().getQuantity());
     }
     ConstantStrings.clear();
     Categories.clear();
