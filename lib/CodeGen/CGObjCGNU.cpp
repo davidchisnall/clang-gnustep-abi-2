@@ -1361,12 +1361,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       auto methodArrayBuilder = methodListBuilder.beginArray();
       for (const auto *I : OID->class_methods()) {
         auto methodBuilder = methodArrayBuilder.beginStruct();
-        // SEL selector
-        methodBuilder.add(GetConstantSelector(I->getSelector(),
-              Context.getObjCEncodingForMethodDecl(I)));
-        // const char *types;
-        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(I,
-              true)));
         // IMP imp;
         llvm::Constant *FnPtr =
           TheModule.getFunction(SymbolNameForMethod(className, "",
@@ -1374,6 +1368,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
                                                     /*isClassMethod*/true));
         assert(FnPtr && "Can't generate metadata for method that doesn't exist");
         methodBuilder.addBitCast(FnPtr, IMPTy);
+        // SEL selector
+        methodBuilder.add(GetConstantSelector(I->getSelector(),
+              Context.getObjCEncodingForMethodDecl(I)));
+        // const char *types;
+        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(I,
+              true)));
         methodBuilder.finishAndAddTo(methodArrayBuilder);
       }
       methodArrayBuilder.finishAndAddTo(methodListBuilder);
@@ -1537,12 +1537,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         if (!method)
           return;
         auto methodBuilder = methodArrayBuilder.beginStruct();
-        // SEL selector
-        methodBuilder.add(GetConstantSelector(method->getSelector(),
-              Context.getObjCEncodingForMethodDecl(method)));
-        // const char *types;
-        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(method,
-              true)));
         // IMP imp;
         llvm::Constant *FnPtr =
           TheModule.getFunction(SymbolNameForMethod(className, "",
@@ -1550,6 +1544,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
                                                     /*isClassMethod*/false));
         assert(FnPtr && "Can't generate metadata for method that doesn't exist");
         methodBuilder.addBitCast(FnPtr, IMPTy);
+        // SEL selector
+        methodBuilder.add(GetConstantSelector(method->getSelector(),
+              Context.getObjCEncodingForMethodDecl(method)));
+        // const char *types;
+        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(method,
+              true)));
         methodBuilder.finishAndAddTo(methodArrayBuilder);
       };
 
@@ -2396,12 +2396,26 @@ GenerateMethodList(StringRef ClassName,
       IMPTy        // Method pointer
     });
   auto &Runtime = CGM.getLangOpts().ObjCRuntime;
-  if (ObjCRuntime::GNUstep &&
-      (Runtime.getVersion() >= VersionTuple(2, 0))) {
+  bool isV2ABI = ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0));
+  if (isV2ABI) {
     // size_t size;
     llvm::DataLayout td(&TheModule);
     MethodList.addInt(SizeTy, td.getTypeSizeInBits(ObjCMethodTy) /
         CGM.getContext().getCharWidth());
+    ObjCMethodTy =
+      llvm::StructType::get(CGM.getLLVMContext(), {
+        IMPTy,       // Method pointer
+        PtrToInt8Ty, // Selector
+        PtrToInt8Ty  // Extended type encoding
+      });
+  } else {
+    ObjCMethodTy =
+      llvm::StructType::get(CGM.getLLVMContext(), {
+        PtrToInt8Ty, // Really a selector, but the runtime creates it us.
+        PtrToInt8Ty, // Method types
+        IMPTy        // Method pointer
+      });
   }
   auto Methods = MethodList.beginArray();
   for (unsigned int i = 0, e = MethodTypes.size(); i < e; ++i) {
@@ -2411,9 +2425,12 @@ GenerateMethodList(StringRef ClassName,
                                                 isClassMethodList));
     assert(FnPtr && "Can't generate metadata for method that doesn't exist");
     auto Method = Methods.beginStruct(ObjCMethodTy);
+    if (isV2ABI)
+      Method.addBitCast(FnPtr, IMPTy);
     Method.add(MakeConstantString(MethodSels[i].getAsString()));
     Method.add(MethodTypes[i]);
-    Method.addBitCast(FnPtr, IMPTy);
+    if (!isV2ABI)
+      Method.addBitCast(FnPtr, IMPTy);
     Method.finishAndAddTo(Methods);
   }
   Methods.finishAndAddTo(MethodList);
