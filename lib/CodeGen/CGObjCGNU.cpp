@@ -526,6 +526,10 @@ public:
   Address GetAddrOfSelector(CodeGenFunction &CGF, Selector Sel) override;
   llvm::Value *GetSelector(CodeGenFunction &CGF,
                            const ObjCMethodDecl *Method) override;
+  virtual llvm::Constant *GetConstantSelector(Selector Sel,
+                                              const std::string &TypeEncoding) {
+    llvm_unreachable("Runtime unable to generate constant selector");
+  }
   llvm::Constant *GetEHType(QualType T) override;
 
   llvm::Function *GenerateMethod(const ObjCMethodDecl *OMD,
@@ -1150,7 +1154,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     return llvm::ConstantExpr::getGetElementPtr(TypesGlobal->getValueType(),
         TypesGlobal, Zeros);
   }
-  llvm::Constant *GetConstantSelector(Selector Sel, const std::string &TypeEncoding) {
+  llvm::Constant *GetConstantSelector(Selector Sel,
+                                      const std::string &TypeEncoding) override {
     // @ is used as a special character in symbol names (used for symbol
     // versioning), so mangle the name to not include it.  Replace it with a
     // character that is not a valid type encoding character (and, being
@@ -1681,7 +1686,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     Classes.push_back(classStruct);
   }
   public:
-    CGObjCGNUstep2(CodeGenModule &Mod) : CGObjCGNUstep(Mod, 10, 3, 2) {
+    CGObjCGNUstep2(CodeGenModule &Mod) : CGObjCGNUstep(Mod, 10, 4, 2) {
       MsgLookupSuperFn.init(&CGM, "objc_msg_lookup_super", IMPTy,
                             PtrToObjCSuperTy, SelectorTy);
     }
@@ -2729,10 +2734,28 @@ CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
   llvm::Constant *PropertyList;
   llvm::Constant *OptionalPropertyList;
 
-  llvm::StructType *propertyMetadataTy =
-    llvm::StructType::get(CGM.getLLVMContext(),
-      { PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
-        PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
+  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
+  bool isV2ABI = ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0));
+
+  llvm::StructType *propertyMetadataTy;
+  if (isV2ABI)
+    // struct objc_property
+    // {
+    //   const char *name;
+    //   const char *attributes;
+    //   const char *type;
+    //   SEL getter;
+    //   SEL setter;
+    // }
+    propertyMetadataTy =
+      llvm::StructType::get(CGM.getLLVMContext(),
+          { PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
+  else
+    propertyMetadataTy =
+      llvm::StructType::get(CGM.getLLVMContext(),
+          { PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
+            PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
 
   unsigned numReqProperties = 0, numOptProperties = 0;
   for (auto property : PD->instance_properties()) {
@@ -2761,19 +2784,39 @@ CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
       (property->isOptional() ? optPropertiesArray : reqPropertiesArray);
     auto fields = propertiesArray.beginStruct(propertyMetadataTy);
 
-    fields.add(MakePropertyEncodingString(property, nullptr));
-    PushPropertyAttributes(fields, property);
+    if (isV2ABI) {
+      fields.add(MakeConstantString(property->getNameAsString()));
+      std::string TypeStr =
+        CGM.getContext().getObjCEncodingForPropertyDecl(property, nullptr);
+      fields.add(MakeConstantString(TypeStr));
+    } else {
+      fields.add(MakePropertyEncodingString(property, nullptr));
+      PushPropertyAttributes(fields, property);
+    }
     auto addIfExists = [&](ObjCMethodDecl *accessor) {
-      if (accessor) {
-        std::string typeStr = Context.getObjCEncodingForMethodDecl(accessor);
-        llvm::Constant *typeEncoding = MakeConstantString(typeStr);
-        fields.add(MakeConstantString(accessor->getSelector().getAsString()));
-        fields.add(typeEncoding);
+      if (isV2ABI) {
+        if (accessor)
+          fields.add(GetConstantSelector(accessor->getSelector(),
+                Context.getObjCEncodingForMethodDecl(accessor)));
+        else
+          fields.add(NULLPtr);
       } else {
-        fields.add(NULLPtr);
-        fields.add(NULLPtr);
+        if (accessor) {
+          std::string typeStr = Context.getObjCEncodingForMethodDecl(accessor);
+          llvm::Constant *typeEncoding = MakeConstantString(typeStr);
+          fields.add(MakeConstantString(accessor->getSelector().getAsString()));
+          fields.add(typeEncoding);
+        } else {
+          fields.add(NULLPtr);
+          fields.add(NULLPtr);
+        }
       }
     };
+    if (isV2ABI) {
+      std::string typeStr;
+      Context.getObjCEncodingForType(property->getType(), typeStr);
+      fields.add(MakeConstantString(typeStr));
+    }
 
     addIfExists(property->getGetterMethodDecl());
     addIfExists(property->getSetterMethodDecl());
@@ -3031,20 +3074,19 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
       auto properties = propertyList.beginArray();
       for (auto *property : CatDecl->properties()) {
         auto fields = properties.beginStruct();
-        fields.add(MakePropertyEncodingString(property, OCD));
-        // FIXME: It would be nice to get the @dynamic property here, but
-        // there's currently no good way of doing it.
-        PushPropertyAttributes(fields, property, false, false);
+        fields.add(MakeConstantString(property->getNameAsString()));
+        std::string TypeStr =
+          CGM.getContext().getObjCEncodingForPropertyDecl(property, OCD);
+        fields.add(MakeConstantString(TypeStr));
+        std::string typeStr;
+        Context.getObjCEncodingForType(property->getType(), typeStr);
+        fields.add(MakeConstantString(typeStr));
         auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
-          if (accessor) {
-            std::string TypeStr = Context.getObjCEncodingForMethodDecl(accessor);
-            llvm::Constant *TypeEncoding = MakeConstantString(TypeStr);
-            fields.add(MakeConstantString(accessor->getSelector().getAsString()));
-            fields.add(TypeEncoding);
-          } else {
+          if (accessor)
+            fields.add(GetConstantSelector(accessor->getSelector(),
+                  Context.getObjCEncodingForMethodDecl(accessor)));
+          else
             fields.add(NULLPtr);
-            fields.add(NULLPtr);
-          }
         };
         addPropertyMethod(property->getGetterMethodDecl());
         addPropertyMethod(property->getSetterMethodDecl());
@@ -3070,12 +3112,31 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
         SmallVectorImpl<Selector> &InstanceMethodSels,
         SmallVectorImpl<llvm::Constant*> &InstanceMethodTypes) {
   ASTContext &Context = CGM.getContext();
+
+  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
+  bool isV2ABI = (ObjCRuntime::GNUstep &&
+      (Runtime.getVersion() >= VersionTuple(2, 0)));
+
   // Property metadata: name, attributes, attributes2, padding1, padding2,
   // setter name, setter types, getter name, getter types.
-  llvm::StructType *propertyMetadataTy =
-    llvm::StructType::get(CGM.getLLVMContext(),
-        { PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
-          PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
+  llvm::StructType *propertyMetadataTy;
+  if (isV2ABI)
+    // struct objc_property
+    // {
+    //   const char *name;
+    //   const char *attributes;
+    //   const char *type;
+    //   SEL getter;
+    //   SEL setter;
+    // }
+    propertyMetadataTy =
+      llvm::StructType::get(CGM.getLLVMContext(),
+          { PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
+  else
+    propertyMetadataTy =
+      llvm::StructType::get(CGM.getLLVMContext(),
+          { PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
+            PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
 
   unsigned numProperties = 0;
   for (auto *propertyImpl : OID->property_impls()) {
@@ -3088,9 +3149,7 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
   ConstantInitBuilder builder(CGM);
   auto propertyList = builder.beginStruct();
   propertyList.addInt(IntTy, numProperties);
-  auto &Runtime = CGM.getLangOpts().ObjCRuntime;
-  if (ObjCRuntime::GNUstep &&
-      (Runtime.getVersion() >= VersionTuple(2, 0))) {
+  if (isV2ABI) {
     llvm::DataLayout td(&TheModule);
     propertyList.addInt(IntTy, td.getTypeSizeInBits(propertyMetadataTy) /
         CGM.getContext().getCharWidth());
@@ -3108,8 +3167,20 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
     bool isDynamic = (propertyImpl->getPropertyImplementation() == 
         ObjCPropertyImplDecl::Dynamic);
 
-    fields.add(MakePropertyEncodingString(property, OID));
-    PushPropertyAttributes(fields, property, isSynthesized, isDynamic);
+    if (isV2ABI) {
+      fields.add(MakeConstantString(property->getNameAsString()));
+      std::string TypeStr =
+        CGM.getContext().getObjCEncodingForPropertyDecl(property, OID);
+      fields.add(MakeConstantString(TypeStr));
+    } else {
+      fields.add(MakePropertyEncodingString(property, OID));
+      PushPropertyAttributes(fields, property, isSynthesized, isDynamic);
+    }
+    if (isV2ABI) {
+      std::string typeStr;
+      Context.getObjCEncodingForType(property->getType(), typeStr);
+      fields.add(MakeConstantString(typeStr));
+    }
     auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
       if (accessor) {
         std::string TypeStr = Context.getObjCEncodingForMethodDecl(accessor);
@@ -3118,11 +3189,16 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID,
           InstanceMethodTypes.push_back(TypeEncoding);
           InstanceMethodSels.push_back(accessor->getSelector());
         }
-        fields.add(MakeConstantString(accessor->getSelector().getAsString()));
-        fields.add(TypeEncoding);
+        if (isV2ABI)
+          fields.add(GetConstantSelector(accessor->getSelector(), TypeStr));
+        else {
+          fields.add(MakeConstantString(accessor->getSelector().getAsString()));
+          fields.add(TypeEncoding);
+        }
       } else {
         fields.add(NULLPtr);
-        fields.add(NULLPtr);
+        if (!isV2ABI)
+          fields.add(NULLPtr);
       }
     };
     addPropertyMethod(property->getGetterMethodDecl());
