@@ -3064,6 +3064,13 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
       auto propertyList = builder.beginStruct();
       // int count;
       propertyList.addInt(IntTy, numProperties);
+      // int size;
+      auto *propertyMetadataTy =
+        llvm::StructType::get(CGM.getLLVMContext(),
+            { PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty });
+      llvm::DataLayout td(&TheModule);
+      propertyList.addInt(IntTy, td.getTypeSizeInBits(propertyMetadataTy) /
+          CGM.getContext().getCharWidth());
       // struct objc_property_list *next;
       propertyList.add(NULLPtr);
       // struct objc_property properties[]
