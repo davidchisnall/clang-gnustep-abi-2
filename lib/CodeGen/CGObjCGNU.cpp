@@ -442,9 +442,22 @@ protected:
 
   /// Generates a method list.  This is used by protocols to define the required
   /// and optional methods.
-  llvm::Constant *GenerateProtocolMethodList(
-      ArrayRef<llvm::Constant *> MethodNames,
-      ArrayRef<llvm::Constant *> MethodTypes);
+  virtual llvm::Constant *GenerateProtocolMethodList(
+      ArrayRef<const ObjCMethodDecl*> Methods);
+  /// Emits optional and required method lists.
+  template<class T>
+  void EmitProtocolMethodList(T &&Methods, llvm::Constant *&Required,
+      llvm::Constant *&Optional) {
+    SmallVector<const ObjCMethodDecl*, 16> RequiredMethods;
+    SmallVector<const ObjCMethodDecl*, 16> OptionalMethods;
+    for (const auto *I : Methods)
+      if (I->getImplementationControl() == ObjCMethodDecl::Optional)
+        OptionalMethods.push_back(I);
+      else
+        RequiredMethods.push_back(I);
+    Required = GenerateProtocolMethodList(RequiredMethods);
+    Optional = GenerateProtocolMethodList(OptionalMethods);
+  }
 
   /// Returns a selector with the specified type encoding.  An empty string is
   /// used to return an untyped selector (with the types field set to NULL).
@@ -529,6 +542,10 @@ public:
   virtual llvm::Constant *GetConstantSelector(Selector Sel,
                                               const std::string &TypeEncoding) {
     llvm_unreachable("Runtime unable to generate constant selector");
+  }
+  llvm::Constant *GetConstantSelector(const ObjCMethodDecl *M) {
+    return GetConstantSelector(M->getSelector(),
+        CGM.getContext().getObjCEncodingForMethodDecl(M));
   }
   llvm::Constant *GetEHType(QualType T) override;
 
@@ -891,6 +908,33 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       GV->setSection(Section);
     return GV;
   }
+  llvm::Constant *
+  GenerateProtocolMethodList(ArrayRef<const ObjCMethodDecl*> Methods) override {
+    // Get the method structure type.
+    llvm::StructType *ObjCMethodDescTy =
+      llvm::StructType::get(CGM.getLLVMContext(),
+          { PtrToInt8Ty, PtrToInt8Ty });
+    ASTContext &Context = CGM.getContext();
+    ConstantInitBuilder Builder(CGM);
+    auto MethodList = Builder.beginStruct();
+    // int count;
+    MethodList.addInt(IntTy, Methods.size());
+    // int size; // sizeof(struct objc_method_description)
+    llvm::DataLayout td(&TheModule);
+    MethodList.addInt(IntTy, td.getTypeSizeInBits(ObjCMethodDescTy) /
+        CGM.getContext().getCharWidth());
+    // struct objc_method_description[]
+    auto MethodArray = MethodList.beginArray(ObjCMethodDescTy);
+    for (auto *M : Methods) {
+      auto Method = MethodArray.beginStruct(ObjCMethodDescTy);
+      Method.add(CGObjCGNU::GetConstantSelector(M));
+      Method.add(GetTypeString(Context.getObjCEncodingForMethodDecl(M, true)));
+      Method.finishAndAddTo(MethodArray);
+    }
+    MethodArray.finishAndAddTo(MethodList);
+    return MethodList.finishAndCreateGlobal(".objc_protocol_method_list",
+                                            CGM.getPointerAlign());
+  }
 
   llvm::Value *LookupIMPSuper(CodeGenFunction &CGF, Address ObjCSuper,
                               llvm::Value *cmd, MessageSendInfo &MSI) override {
@@ -1036,30 +1080,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     }
     EmittedProtocolRef = true;
     return CGF.Builder.CreateAlignedLoad(Ref, CGM.getPointerAlign());
-  }
-  template<class T>
-  void EmitProtocolMethodList(T &&Methods, llvm::Constant *&Required,
-      llvm::Constant *&Optional) {
-    ASTContext &Context = CGM.getContext();
-    SmallVector<llvm::Constant*, 16> MethodNames;
-    SmallVector<llvm::Constant*, 16> MethodTypes;
-    SmallVector<llvm::Constant*, 16> OptionalMethodNames;
-    SmallVector<llvm::Constant*, 16> OptionalMethodTypes;
-    for (const auto *I : Methods) {
-      std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
-      if (I->getImplementationControl() == ObjCMethodDecl::Optional) {
-        OptionalMethodNames.push_back(
-            MakeConstantString(I->getSelector().getAsString()));
-        OptionalMethodTypes.push_back(MakeConstantString(TypeStr));
-      } else {
-        MethodNames.push_back(
-            MakeConstantString(I->getSelector().getAsString()));
-        MethodTypes.push_back(MakeConstantString(TypeStr));
-      }
-    }
-    Required = GenerateProtocolMethodList(MethodNames, MethodTypes);
-    Optional = GenerateProtocolMethodList(OptionalMethodNames,
-        OptionalMethodTypes);
   }
 
   llvm::Constant *GenerateProtocolList(ArrayRef<llvm::Constant*> Protocols) {
@@ -1407,8 +1427,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         assert(FnPtr && "Can't generate metadata for method that doesn't exist");
         methodBuilder.addBitCast(FnPtr, IMPTy);
         // SEL selector
-        methodBuilder.add(GetConstantSelector(I->getSelector(),
-              Context.getObjCEncodingForMethodDecl(I)));
+        methodBuilder.add(CGObjCGNU::GetConstantSelector(I));
         // const char *types;
         methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(I,
               true)));
@@ -1583,8 +1602,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         assert(FnPtr && "Can't generate metadata for method that doesn't exist");
         methodBuilder.addBitCast(FnPtr, IMPTy);
         // SEL selector
-        methodBuilder.add(GetConstantSelector(method->getSelector(),
-              Context.getObjCEncodingForMethodDecl(method)));
+        methodBuilder.add(CGObjCGNU::GetConstantSelector(method));
         // const char *types;
         methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(method,
               true)));
@@ -2645,22 +2663,22 @@ llvm::Constant *CGObjCGNU::GenerateClassStructure(
 }
 
 llvm::Constant *CGObjCGNU::
-GenerateProtocolMethodList(ArrayRef<llvm::Constant *> MethodNames,
-                           ArrayRef<llvm::Constant *> MethodTypes) {
+GenerateProtocolMethodList(ArrayRef<const ObjCMethodDecl*> Methods) {
   // Get the method structure type.
   llvm::StructType *ObjCMethodDescTy =
     llvm::StructType::get(CGM.getLLVMContext(), { PtrToInt8Ty, PtrToInt8Ty });
+  ASTContext &Context = CGM.getContext();
   ConstantInitBuilder Builder(CGM);
   auto MethodList = Builder.beginStruct();
-  MethodList.addInt(IntTy, MethodNames.size());
-  auto Methods = MethodList.beginArray(ObjCMethodDescTy);
-  for (unsigned int i = 0, e = MethodTypes.size() ; i < e ; i++) {
-    auto Method = Methods.beginStruct(ObjCMethodDescTy);
-    Method.add(MethodNames[i]);
-    Method.add(MethodTypes[i]);
-    Method.finishAndAddTo(Methods);
+  MethodList.addInt(IntTy, Methods.size());
+  auto MethodArray = MethodList.beginArray(ObjCMethodDescTy);
+  for (auto *M : Methods) {
+    auto Method = MethodArray.beginStruct(ObjCMethodDescTy);
+    Method.add(MakeConstantString(M->getSelector().getAsString()));
+    Method.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(M)));
+    Method.finishAndAddTo(MethodArray);
   }
-  Methods.finishAndAddTo(MethodList);
+  MethodArray.finishAndAddTo(MethodList);
   return MethodList.finishAndCreateGlobal(".objc_method_list",
                                           CGM.getPointerAlign());
 }
@@ -2705,7 +2723,7 @@ llvm::Value *CGObjCGNU::GenerateProtocolRef(CodeGenFunction &CGF,
 llvm::Constant *
 CGObjCGNU::GenerateEmptyProtocol(StringRef ProtocolName) {
   llvm::Constant *ProtocolList = GenerateProtocolList({});
-  llvm::Constant *MethodList = GenerateProtocolMethodList({}, {});
+  llvm::Constant *MethodList = GenerateProtocolMethodList({});
   MethodList = llvm::ConstantExpr::getBitCast(MethodList, PtrToInt8Ty);
   // Protocols are objects containing lists of the methods implemented and
   // protocols adopted.
@@ -2796,8 +2814,7 @@ CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
     auto addIfExists = [&](ObjCMethodDecl *accessor) {
       if (isV2ABI) {
         if (accessor)
-          fields.add(GetConstantSelector(accessor->getSelector(),
-                Context.getObjCEncodingForMethodDecl(accessor)));
+          fields.add(GetConstantSelector(accessor));
         else
           fields.add(NULLPtr);
       } else {
@@ -2837,7 +2854,6 @@ CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
 }
 
 void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
-  ASTContext &Context = CGM.getContext();
   std::string ProtocolName = PD->getNameAsString();
   
   // Use the protocol definition, if there is one.
@@ -2847,51 +2863,31 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   SmallVector<std::string, 16> Protocols;
   for (const auto *PI : PD->protocols())
     Protocols.push_back(PI->getNameAsString());
-  SmallVector<llvm::Constant*, 16> InstanceMethodNames;
-  SmallVector<llvm::Constant*, 16> InstanceMethodTypes;
-  SmallVector<llvm::Constant*, 16> OptionalInstanceMethodNames;
-  SmallVector<llvm::Constant*, 16> OptionalInstanceMethodTypes;
-  for (const auto *I : PD->instance_methods()) {
-    std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
-    if (I->getImplementationControl() == ObjCMethodDecl::Optional) {
-      OptionalInstanceMethodNames.push_back(
-          MakeConstantString(I->getSelector().getAsString()));
-      OptionalInstanceMethodTypes.push_back(MakeConstantString(TypeStr));
-    } else {
-      InstanceMethodNames.push_back(
-          MakeConstantString(I->getSelector().getAsString()));
-      InstanceMethodTypes.push_back(MakeConstantString(TypeStr));
-    }
-  }
+  SmallVector<const ObjCMethodDecl*, 16> InstanceMethods;
+  SmallVector<const ObjCMethodDecl*, 16> OptionalInstanceMethods;
+  for (const auto *I : PD->instance_methods())
+    if (I->getImplementationControl() == ObjCMethodDecl::Optional)
+      OptionalInstanceMethods.push_back(I);
+    else
+      InstanceMethods.push_back(I);
   // Collect information about class methods:
-  SmallVector<llvm::Constant*, 16> ClassMethodNames;
-  SmallVector<llvm::Constant*, 16> ClassMethodTypes;
-  SmallVector<llvm::Constant*, 16> OptionalClassMethodNames;
-  SmallVector<llvm::Constant*, 16> OptionalClassMethodTypes;
-  for (const auto *I : PD->class_methods()) {
-    std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
-    if (I->getImplementationControl() == ObjCMethodDecl::Optional) {
-      OptionalClassMethodNames.push_back(
-          MakeConstantString(I->getSelector().getAsString()));
-      OptionalClassMethodTypes.push_back(MakeConstantString(TypeStr));
-    } else {
-      ClassMethodNames.push_back(
-          MakeConstantString(I->getSelector().getAsString()));
-      ClassMethodTypes.push_back(MakeConstantString(TypeStr));
-    }
-  }
+  SmallVector<const ObjCMethodDecl*, 16> ClassMethods;
+  SmallVector<const ObjCMethodDecl*, 16> OptionalClassMethods;
+  for (const auto *I : PD->class_methods())
+    if (I->getImplementationControl() == ObjCMethodDecl::Optional)
+      OptionalClassMethods.push_back(I);
+    else
+      ClassMethods.push_back(I);
 
   llvm::Constant *ProtocolList = GenerateProtocolList(Protocols);
   llvm::Constant *InstanceMethodList =
-    GenerateProtocolMethodList(InstanceMethodNames, InstanceMethodTypes);
+    GenerateProtocolMethodList(InstanceMethods);
   llvm::Constant *ClassMethodList =
-    GenerateProtocolMethodList(ClassMethodNames, ClassMethodTypes);
+    GenerateProtocolMethodList(ClassMethods);
   llvm::Constant *OptionalInstanceMethodList =
-    GenerateProtocolMethodList(OptionalInstanceMethodNames,
-            OptionalInstanceMethodTypes);
+    GenerateProtocolMethodList(OptionalInstanceMethods);
   llvm::Constant *OptionalClassMethodList =
-    GenerateProtocolMethodList(OptionalClassMethodNames,
-            OptionalClassMethodTypes);
+    GenerateProtocolMethodList(OptionalClassMethods);
 
   // Property metadata: name, attributes, isSynthesized, setter name, setter
   // types, getter name, getter types.
@@ -3083,8 +3079,7 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
         fields.add(MakeConstantString(typeStr));
         auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
           if (accessor)
-            fields.add(GetConstantSelector(accessor->getSelector(),
-                  Context.getObjCEncodingForMethodDecl(accessor)));
+            fields.add(GetConstantSelector(accessor));
           else
             fields.add(NULLPtr);
         };
