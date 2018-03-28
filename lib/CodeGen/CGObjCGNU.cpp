@@ -902,8 +902,11 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   bool EmittedProtocolRef = false;
   /// Generate the name of a symbol for a reference to a class.  Accesses to
   /// classes should be indirected via this.
-  std::string SymbolForClassRef(StringRef Name) {
-    return (StringRef("_OBJC_CLASS_REF_") + Name).str();
+  std::string SymbolForClassRef(StringRef Name, bool isWeak) {
+    if (isWeak)
+      return (StringRef("_OBJC_CLASS_WEAK_REF_") + Name).str();
+    else
+      return (StringRef("_OBJC_CLASS_REF_") + Name).str();
   }
   /// Generate the name of a class symbol.
   std::string SymbolForClass(StringRef Name) {
@@ -1001,13 +1004,19 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   }
 
   llvm::GlobalVariable *GetClassVar(StringRef Name, bool isWeak=false) {
-    std::string SymbolName = SymbolForClassRef(Name);
+    std::string SymbolName = SymbolForClassRef(Name, isWeak);
     auto *ClassSymbol = TheModule.getNamedGlobal(SymbolName);
     if (ClassSymbol)
       return ClassSymbol;
     ClassSymbol = new llvm::GlobalVariable(TheModule,
         IdTy, false, llvm::GlobalValue::ExternalLinkage,
         nullptr, SymbolName);
+    if (isWeak) {
+      // Placeholder for the real symbol.
+      ClassSymbol->setInitializer(new llvm::GlobalVariable(TheModule,
+          Int8Ty, false, llvm::GlobalValue::ExternalWeakLinkage,
+          nullptr, SymbolForClass(Name)));
+    }
     assert(ClassSymbol->getName() == SymbolName);
     return ClassSymbol;
   }
