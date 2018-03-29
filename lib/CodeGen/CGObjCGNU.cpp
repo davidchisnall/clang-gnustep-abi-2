@@ -271,11 +271,27 @@ protected:
     Fields.addInt(Int8Ty, 0);
   }
 
-  virtual void PushProperty(ConstantStructBuilder &Fields,
+  virtual ConstantArrayBuilder PushPropertyListHeader(ConstantStructBuilder &Fields,
+      int count) {
+      // int count;
+      Fields.addInt(IntTy, count);
+      // int size; (only in GNUstep v2 ABI.
+      if (isRuntime(ObjCRuntime::GNUstep, 2)) {
+        llvm::DataLayout td(&TheModule);
+        Fields.addInt(IntTy, td.getTypeSizeInBits(PropertyMetadataTy) /
+            CGM.getContext().getCharWidth());
+      }
+      // struct objc_property_list *next;
+      Fields.add(NULLPtr);
+      // struct objc_property properties[]
+      return Fields.beginArray(PropertyMetadataTy);
+  }
+  virtual void PushProperty(ConstantArrayBuilder &PropertiesArray,
             ObjCPropertyDecl *property,
             const ObjCContainerDecl *OCD,
             bool isSynthesized=true, bool
             isDynamic=true) {
+    auto Fields = PropertiesArray.beginStruct(PropertyMetadataTy);
     ASTContext &Context = CGM.getContext();
     Fields.add(MakePropertyEncodingString(property, OCD));
     PushPropertyAttributes(Fields, property, isSynthesized, isDynamic);
@@ -292,6 +308,7 @@ protected:
     };
     addPropertyMethod(property->getGetterMethodDecl());
     addPropertyMethod(property->getSetterMethodDecl());
+    Fields.finishAndAddTo(PropertiesArray);
   }
 
   /// Ensures that the value has the required type, by inserting a bitcast if
@@ -941,11 +958,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     return GV;
   }
 
-  void PushProperty(ConstantStructBuilder &Fields,
+  void PushProperty(ConstantArrayBuilder &PropertiesArray,
             ObjCPropertyDecl *property,
             const ObjCContainerDecl *OCD,
             bool isSynthesized=true, bool
             isDynamic=true) override {
+    auto Fields = PropertiesArray.beginStruct(PropertyMetadataTy);
     ASTContext &Context = CGM.getContext();
     Fields.add(MakeConstantString(property->getNameAsString()));
     std::string TypeStr =
@@ -964,6 +982,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     };
     addPropertyMethod(property->getGetterMethodDecl());
     addPropertyMethod(property->getSetterMethodDecl());
+    Fields.finishAndAddTo(PropertiesArray);
   }
 
   llvm::Constant *
@@ -2832,11 +2851,8 @@ CGObjCGNU::GenerateEmptyProtocol(StringRef ProtocolName) {
 
 std::pair<llvm::Constant*, llvm::Constant*>
 CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
-  ASTContext &Context = CGM.getContext();
   llvm::Constant *PropertyList;
   llvm::Constant *OptionalPropertyList;
-
-  bool isV2ABI = isRuntime(ObjCRuntime::GNUstep, 2);
 
   unsigned numReqProperties = 0, numOptProperties = 0;
   for (auto property : PD->instance_properties()) {
@@ -2848,60 +2864,20 @@ CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
 
   ConstantInitBuilder reqPropertyListBuilder(CGM);
   auto reqPropertiesList = reqPropertyListBuilder.beginStruct();
-  reqPropertiesList.addInt(IntTy, numReqProperties);
-  reqPropertiesList.add(NULLPtr);
-  auto reqPropertiesArray = reqPropertiesList.beginArray(PropertyMetadataTy);
+  auto reqPropertiesArray = PushPropertyListHeader(reqPropertiesList,
+      numReqProperties);
 
   ConstantInitBuilder optPropertyListBuilder(CGM);
   auto optPropertiesList = optPropertyListBuilder.beginStruct();
-  optPropertiesList.addInt(IntTy, numOptProperties);
-  optPropertiesList.add(NULLPtr);
-  auto optPropertiesArray = optPropertiesList.beginArray(PropertyMetadataTy);
+  auto optPropertiesArray = PushPropertyListHeader(optPropertiesList,
+      numOptProperties);
 
   // Add all of the property methods need adding to the method list and to the
   // property metadata list.
   for (auto *property : PD->instance_properties()) {
     auto &propertiesArray =
       (property->isOptional() ? optPropertiesArray : reqPropertiesArray);
-    auto fields = propertiesArray.beginStruct(PropertyMetadataTy);
-
-    if (isV2ABI) {
-      fields.add(MakeConstantString(property->getNameAsString()));
-      std::string TypeStr =
-        CGM.getContext().getObjCEncodingForPropertyDecl(property, nullptr);
-      fields.add(MakeConstantString(TypeStr));
-    } else {
-      fields.add(MakePropertyEncodingString(property, nullptr));
-      PushPropertyAttributes(fields, property);
-    }
-    auto addIfExists = [&](ObjCMethodDecl *accessor) {
-      if (isV2ABI) {
-        if (accessor)
-          fields.add(GetConstantSelector(accessor));
-        else
-          fields.add(NULLPtr);
-      } else {
-        if (accessor) {
-          std::string typeStr = Context.getObjCEncodingForMethodDecl(accessor);
-          llvm::Constant *typeEncoding = MakeConstantString(typeStr);
-          fields.add(MakeConstantString(accessor->getSelector().getAsString()));
-          fields.add(typeEncoding);
-        } else {
-          fields.add(NULLPtr);
-          fields.add(NULLPtr);
-        }
-      }
-    };
-    if (isV2ABI) {
-      std::string typeStr;
-      Context.getObjCEncodingForType(property->getType(), typeStr);
-      fields.add(MakeConstantString(typeStr));
-    }
-
-    addIfExists(property->getGetterMethodDecl());
-    addIfExists(property->getSetterMethodDecl());
-
-    fields.finishAndAddTo(propertiesArray);
+    PushProperty(propertiesArray, property, nullptr);
   }
 
   reqPropertiesArray.finishAndAddTo(reqPropertiesList);
@@ -3122,21 +3098,9 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
     else  {
       ConstantInitBuilder builder(CGM);
       auto propertyList = builder.beginStruct();
-      // int count;
-      propertyList.addInt(IntTy, numProperties);
-      // int size;
-      llvm::DataLayout td(&TheModule);
-      propertyList.addInt(IntTy, td.getTypeSizeInBits(PropertyMetadataTy) /
-          CGM.getContext().getCharWidth());
-      // struct objc_property_list *next;
-      propertyList.add(NULLPtr);
-      // struct objc_property properties[]
-      auto properties = propertyList.beginArray();
-      for (auto *property : CatDecl->properties()) {
-        auto fields = properties.beginStruct();
-        PushProperty(fields, property, OCD);
-        fields.finishAndAddTo(properties);
-      }
+      auto properties = PushPropertyListHeader(propertyList, numProperties);
+      for (auto *property : CatDecl->properties())
+        PushProperty(properties, property, OCD);
       properties.finishAndAddTo(propertyList);
 
       Elements.add(propertyList.finishAndCreateGlobal(".objc_property_list",
@@ -3155,8 +3119,6 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
 
 llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID) {
 
-  bool isV2ABI = isRuntime(ObjCRuntime::GNUstep, 2);
-
   unsigned numProperties = 0;
   for (auto *propertyImpl : OID->property_impls()) {
     (void) propertyImpl;
@@ -3167,26 +3129,17 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID) {
 
   ConstantInitBuilder builder(CGM);
   auto propertyList = builder.beginStruct();
-  propertyList.addInt(IntTy, numProperties);
-  if (isV2ABI) {
-    llvm::DataLayout td(&TheModule);
-    propertyList.addInt(IntTy, td.getTypeSizeInBits(PropertyMetadataTy) /
-        CGM.getContext().getCharWidth());
-  }
-  propertyList.add(NULLPtr);
-  auto properties = propertyList.beginArray(PropertyMetadataTy);
+  auto properties = PushPropertyListHeader(propertyList, numProperties);
 
   // Add all of the property methods need adding to the method list and to the
   // property metadata list.
   for (auto *propertyImpl : OID->property_impls()) {
-    auto fields = properties.beginStruct(PropertyMetadataTy);
     ObjCPropertyDecl *property = propertyImpl->getPropertyDecl();
     bool isSynthesized = (propertyImpl->getPropertyImplementation() == 
         ObjCPropertyImplDecl::Synthesize);
     bool isDynamic = (propertyImpl->getPropertyImplementation() == 
         ObjCPropertyImplDecl::Dynamic);
-    PushProperty(fields, property, OID, isSynthesized, isDynamic);
-    fields.finishAndAddTo(properties);
+    PushProperty(properties, property, OID, isSynthesized, isDynamic);
   }
   properties.finishAndAddTo(propertyList);
 
