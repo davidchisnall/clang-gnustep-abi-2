@@ -1114,20 +1114,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     return fields.finishAndCreateGlobal(".objc_ivar_list", CGM.getPointerAlign(),
         /*constant*/ false, llvm::GlobalValue::PrivateLinkage);
   }
-#if 0
-  void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {
-    // FIXME: Emit metadata
-    auto AliasSymName = SymbolForClass(OAD->getNameAsString());
-    // Return if this alias is already inserted.
-    if (TheModule.getGlobalVariable(AliasSymName))
-      return;
-    // FIXME:
-    ObjCInterfaceDecl *ClassDecl =
-      const_cast<ObjCInterfaceDecl *>(OAD->getClassInterface());
-    auto *Cls = GetClassVar(ClassDecl->getNameAsString());
-    llvm::GlobalAlias::create(AliasSymName, Cls);
-  }
-#endif
+
   llvm::Constant *GenerateEmptyProtocol(StringRef ProtocolName) override {
     std::string Name = SymbolForProtocol(ProtocolName);
     auto *GV = TheModule.getGlobalVariable(Name);
