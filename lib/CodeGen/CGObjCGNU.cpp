@@ -1074,45 +1074,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
                    ArrayRef<llvm::Constant *> IvarOffsets,
                    ArrayRef<llvm::Constant *> IvarAlign,
                    ArrayRef<Qualifiers::ObjCLifetime> IvarOwnership) override {
-    if (IvarNames.size() == 0)
-      return NULLPtr;
-    llvm::DataLayout td(&TheModule);
-    ConstantInitBuilder builder(CGM);
-    // objc_ivar_list
-    auto fields = builder.beginStruct();
-    // count
-    fields.addInt(IntTy, IvarNames.size());
-    // size
-    llvm::StructType *ObjCIvarTy = llvm::StructType::get(
-      PtrToInt8Ty,
-      PtrToInt8Ty,
-      PtrToInt8Ty,
-      IntTy,
-      IntTy,
-      LongTy);
-    fields.addInt(SizeTy, td.getTypeSizeInBits(ObjCIvarTy) /
-        CGM.getContext().getCharWidth());
-    auto ivars = fields.beginArray();
-    for (unsigned int i = 0, e = IvarNames.size() ; i < e ; i++) {
-      // struct objc_ivar
-      auto ivar = ivars.beginStruct();
-      // name
-      ivar.add(IvarNames[i]);
-      // type
-      ivar.add(IvarTypes[i]);
-      // offset
-      ivar.add(IvarOffsets[i]);
-      // align
-      ivar.add(IvarAlign[i]);
-      // flags
-      ivar.add(FlagsForOwnership(IvarOwnership[i]));
-      ivar.finishAndAddTo(ivars);
-    }
-    ivars.finishAndAddTo(fields);
-
-    // Create an instance of the structure
-    return fields.finishAndCreateGlobal(".objc_ivar_list", CGM.getPointerAlign(),
-        /*constant*/ false, llvm::GlobalValue::PrivateLinkage);
+    llvm_unreachable("Method should not be called!");
   }
 
   llvm::Constant *GenerateEmptyProtocol(StringRef ProtocolName) override {
