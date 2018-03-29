@@ -1467,11 +1467,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // long version;
     metaclassFields.addInt(LongTy, 0);
     // unsigned long info;
-    // objc_class_flag_meta & objc_class_flag_new_abi
-    // FIXME: It probably doesn't make sense to set objc_class_flag_new_abi,
-    // because these are all from a new entry point and the runtime will
-    // auto-upgrade older class structures.
-    metaclassFields.addInt(LongTy, 0x12L);
+    // objc_class_flag_meta
+    metaclassFields.addInt(LongTy, 1);
     // long instance_size;
     // Setting this to zero is consistent with the older ABI, but it might be
     // more sensible to set this to sizeof(struct objc_class)
@@ -1568,11 +1565,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // long version;
     classFields.addInt(LongTy, 0);
     // unsigned long info;
-    // objc_class_flag_meta & objc_class_flag_new_abi
-    // FIXME: It probably doesn't make sense to set objc_class_flag_new_abi,
-    // because these are all from a new entry point and the runtime will
-    // auto-upgrade older class structures.
-    classFields.addInt(LongTy, 0x10L);
+    // !objc_class_flag_meta
+    classFields.addInt(LongTy, 0);
     // long instance_size;
     int superInstanceSize = !SuperClassDecl ? 0 :
       Context.getASTObjCInterfaceLayout(SuperClassDecl).getSize().getQuantity();
