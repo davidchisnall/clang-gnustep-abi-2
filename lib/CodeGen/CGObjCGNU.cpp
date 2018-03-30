@@ -1572,11 +1572,17 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
             false, llvm::GlobalValue::ExternalLinkage,
             OffsetValue, OffsetName);
         ivarBuilder.add(OffsetVar);
-        ivarBuilder.addInt(Int32Ty, Context.getTypeAlign(ivarTy) / 8);
-        // flags.  Ownership flags and bit 2 indicating that this is an
-        // extended type encoding.
+        // Alignment will be stored as a base-2 log of the alignment.
+        int align = llvm::Log2_32(Context.getTypeAlignInChars(ivarTy).getQuantity());
+        // Objects that require more than 2^64-byte alignment should be impossible!
+        assert(align < 64);
+        // uint32_t flags;
+        // Bits 0-1 are ownership.
+        // Bit 2 indicates an extended type encoding
+        // Bits 3-8 contain log2(aligment)
         ivarBuilder.addInt(Int32Ty, 
-            FlagsForOwnership(ivarTy.getQualifiers().getObjCLifetime()) | (1<<2));
+            (align << 3) | (1<<2) |
+            FlagsForOwnership(ivarTy.getQualifiers().getObjCLifetime()));
         ivarBuilder.finishAndAddTo(ivarArrayBuilder);
       }
       ivarArrayBuilder.finishAndAddTo(ivarListBuilder);
