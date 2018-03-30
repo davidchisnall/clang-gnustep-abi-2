@@ -1045,7 +1045,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     return CGF.Builder.CreateLoad(Address(GetClassVar(Name, isWeak),
           CGM.getPointerAlign()));
   }
-  llvm::Constant *FlagsForOwnership(Qualifiers::ObjCLifetime Ownership) {
+  int32_t FlagsForOwnership(Qualifiers::ObjCLifetime Ownership) {
     // typedef enum {
     //   ownership_invalid = 0,
     //   ownership_strong  = 1,
@@ -1067,7 +1067,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       default:
         Flag = 0;
     }
-    return llvm::ConstantInt::get(Int32Ty, Flag);
+    return Flag;
   }
   llvm::Constant *GenerateIvarList(ArrayRef<llvm::Constant *> IvarNames,
                    ArrayRef<llvm::Constant *> IvarTypes,
@@ -1548,8 +1548,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
           CGM.getContext().getCharWidth());
       // struct objc_ivar ivars[]
       auto ivarArrayBuilder = ivarListBuilder.beginArray();
-      // Get te size of the superclass, so that we can calculate all ivar
-      // offsets relative to that.
       for (const ObjCIvarDecl *IVD = classDecl->all_declared_ivar_begin(); IVD;
            IVD = IVD->getNextIvar()) {
         auto ivarTy = IVD->getType();
@@ -1558,7 +1556,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         ivarBuilder.add(MakeConstantString(IVD->getNameAsString()));
         // const char *type;
         std::string TypeStr;
-        Context.getObjCEncodingForType(ivarTy, TypeStr, IVD);
+        //Context.getObjCEncodingForType(ivarTy, TypeStr, IVD, true);
+        Context.getObjCEncodingForMethodParameter(Decl::OBJC_TQ_None, ivarTy, TypeStr, true);
         ivarBuilder.add(MakeConstantString(TypeStr));
         // int *offset;
         uint64_t BaseOffset = ComputeIvarBaseOffset(CGM, OID, IVD);
@@ -1574,9 +1573,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
             OffsetValue, OffsetName);
         ivarBuilder.add(OffsetVar);
         ivarBuilder.addInt(Int32Ty, Context.getTypeAlign(ivarTy) / 8);
-        // flags
-        ivarBuilder.add(
-            FlagsForOwnership(ivarTy.getQualifiers().getObjCLifetime()));
+        // flags.  Ownership flags and bit 2 indicating that this is an
+        // extended type encoding.
+        ivarBuilder.addInt(Int32Ty, 
+            FlagsForOwnership(ivarTy.getQualifiers().getObjCLifetime()) | (1<<2));
         ivarBuilder.finishAndAddTo(ivarArrayBuilder);
       }
       ivarArrayBuilder.finishAndAddTo(ivarListBuilder);
