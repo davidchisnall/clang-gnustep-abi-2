@@ -244,7 +244,7 @@ protected:
 
   /// Push the property attributes into two structure fields. 
   void PushPropertyAttributes(ConstantStructBuilder &Fields,
-      ObjCPropertyDecl *property, bool isSynthesized=true, bool
+      const ObjCPropertyDecl *property, bool isSynthesized=true, bool
       isDynamic=true) {
     int attrs = property->getPropertyAttributes();
     // For read-only properties, clear the copy and retain flags
@@ -287,8 +287,8 @@ protected:
       return Fields.beginArray(PropertyMetadataTy);
   }
   virtual void PushProperty(ConstantArrayBuilder &PropertiesArray,
-            ObjCPropertyDecl *property,
-            const ObjCContainerDecl *OCD,
+            const ObjCPropertyDecl *property,
+            const Decl *OCD,
             bool isSynthesized=true, bool
             isDynamic=true) {
     auto Fields = PropertiesArray.beginStruct(PropertyMetadataTy);
@@ -457,7 +457,9 @@ protected:
 
   /// Generates a list of property metadata structures.  This follows the same
   /// pattern as method and instance variable metadata lists.
-  llvm::Constant *GeneratePropertyList(const ObjCImplDecl *OID);
+  llvm::Constant *GeneratePropertyList(const Decl *Container,
+      const ObjCContainerDecl *OCD,
+      bool isClassProperty=false);
 
   /// Generates a list of referenced protocols.  Classes, categories, and
   /// protocols all use this structure.
@@ -959,8 +961,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   }
 
   void PushProperty(ConstantArrayBuilder &PropertiesArray,
-            ObjCPropertyDecl *property,
-            const ObjCContainerDecl *OCD,
+            const ObjCPropertyDecl *property,
+            const Decl *OCD,
             bool isSynthesized=true, bool
             isDynamic=true) override {
     auto Fields = PropertiesArray.beginStruct(PropertyMetadataTy);
@@ -1485,8 +1487,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // long abi_version;
     metaclassFields.addInt(LongTy, 0);
     // struct objc_property_list *properties
-    // FIXME: We should add class properties here.
-    metaclassFields.addNullPointer(PtrTy);
+    metaclassFields.add(GeneratePropertyList(OID, classDecl, /*isClassProperty*/true));
 
     auto *metaclass = metaclassFields.finishAndCreateGlobal("_OBJC_METACLASS_"
         + className, CGM.getPointerAlign());
@@ -1683,9 +1684,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // long abi_version;
     classFields.addInt(LongTy, 0);
     // struct objc_property_list *properties
-    classFields.add(GeneratePropertyList(OID));
-    // FIXME: We should add class properties here.
-    classFields.addNullPointer(PtrTy);
+    classFields.add(GeneratePropertyList(OID, classDecl));
 
     auto *classStruct =
       classFields.finishAndCreateGlobal(SymbolForClass(className),
@@ -3041,14 +3040,14 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   if (isRuntime(ObjCRuntime::GNUstep, 2)) {
     SmallVector<Selector, 8> Sels;
     SmallVector<llvm::Constant*, 8> Types;
-    auto numProperties = std::distance(CatDecl->prop_begin(), CatDecl->prop_end());
+    auto numProperties = std::distance(CatDecl->instprop_begin(), CatDecl->instprop_end());
     if (numProperties == 0)
       Elements.addNullPointer(PtrTy);
     else  {
       ConstantInitBuilder builder(CGM);
       auto propertyList = builder.beginStruct();
       auto properties = PushPropertyListHeader(propertyList, numProperties);
-      for (auto *property : CatDecl->properties())
+      for (auto *property : CatDecl->instance_properties())
         PushProperty(properties, property, OCD);
       properties.finishAndAddTo(propertyList);
 
@@ -3066,13 +3065,54 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
         PtrTy));
 }
 
-llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID) {
+llvm::Constant *CGObjCGNU::GeneratePropertyList(const Decl *Container,
+    const ObjCContainerDecl *OCD,
+    bool isClassProperty) {
 
-  unsigned numProperties = 0;
-  for (auto *propertyImpl : OID->property_impls()) {
-    (void) propertyImpl;
-    numProperties++;
+  SmallVector<const ObjCPropertyDecl *, 16> Properties;
+  llvm::SmallPtrSet<const IdentifierInfo*, 16> PropertySet;
+
+  std::function<void(const ObjCProtocolDecl *Proto)> collectProtocolProperties
+    = [&](const ObjCProtocolDecl *Proto) {
+      for (const auto *P : Proto->protocols())
+        collectProtocolProperties(P);
+      for (const auto *PD : Proto->properties()) {
+        if (isClassProperty != PD->isClassProperty())
+          continue;
+        if (!PropertySet.insert(PD->getIdentifier()).second)
+          continue;
+        Properties.push_back(PD);
+      }
+    };
+
+  if (const ObjCInterfaceDecl *OID = dyn_cast<ObjCInterfaceDecl>(OCD))
+    for (const ObjCCategoryDecl *ClassExt : OID->known_extensions())
+      for (auto *PD : ClassExt->properties()) {
+        if (isClassProperty != PD->isClassProperty())
+          continue;
+        PropertySet.insert(PD->getIdentifier());
+        Properties.push_back(PD);
+      }
+
+  for (const auto *PD : OCD->properties()) {
+    if (isClassProperty != PD->isClassProperty())
+      continue;
+    // Don't emit duplicate metadata for properties that were already in a
+    // class extension.
+    if (!PropertySet.insert(PD->getIdentifier()).second)
+      continue;
+    Properties.push_back(PD);
   }
+
+  if (const ObjCInterfaceDecl *OID = dyn_cast<ObjCInterfaceDecl>(OCD))
+    for (const auto *P : OID->all_referenced_protocols())
+      collectProtocolProperties(P);
+  else if (const ObjCCategoryDecl *CD = dyn_cast<ObjCCategoryDecl>(OCD))
+    for (const auto *P : CD->protocols())
+      collectProtocolProperties(P);
+
+  auto numProperties = Properties.size();
+
   if (numProperties == 0)
     return NULLPtr;
 
@@ -3082,13 +3122,18 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplDecl *OID) {
 
   // Add all of the property methods need adding to the method list and to the
   // property metadata list.
-  for (auto *propertyImpl : OID->property_impls()) {
-    ObjCPropertyDecl *property = propertyImpl->getPropertyDecl();
-    bool isSynthesized = (propertyImpl->getPropertyImplementation() == 
-        ObjCPropertyImplDecl::Synthesize);
-    bool isDynamic = (propertyImpl->getPropertyImplementation() == 
-        ObjCPropertyImplDecl::Dynamic);
-    PushProperty(properties, property, OID, isSynthesized, isDynamic);
+  ASTContext &Context = CGM.getContext();
+  for (auto *property : Properties) {
+    bool isSynthesized = false;
+    bool isDynamic = false;
+    auto *propertyImpl = Context.getObjCPropertyImplDeclForPropertyDecl(property, Container);
+    if (propertyImpl) {
+      isSynthesized = (propertyImpl->getPropertyImplementation() ==
+          ObjCPropertyImplDecl::Synthesize);
+      isDynamic = (propertyImpl->getPropertyImplementation() ==
+          ObjCPropertyImplDecl::Dynamic);
+    }
+    PushProperty(properties, property, Container, isSynthesized, isDynamic);
   }
   properties.finishAndAddTo(propertyList);
 
@@ -3239,7 +3284,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
       addPropertyMethod(property->getSetterMethodDecl());
     }
 
-  llvm::Constant *Properties = GeneratePropertyList(OID);
+  llvm::Constant *Properties = GeneratePropertyList(OID, ClassDecl);
 
   // Collect information about class methods
   SmallVector<Selector, 16> ClassMethodSels;
@@ -3313,8 +3358,8 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   //Generate metaclass for class methods
   llvm::Constant *MetaClassStruct = GenerateClassStructure(
       NULLPtr, NULLPtr, 0x12L, ClassName.c_str(), nullptr, Zeros[0],
-      NULLPtr, ClassMethodList, NULLPtr, NULLPtr, NULLPtr, ZeroPtr, ZeroPtr,
-      true);
+      NULLPtr, ClassMethodList, NULLPtr, NULLPtr,
+      GeneratePropertyList(OID, ClassDecl, true), ZeroPtr, ZeroPtr, true);
   if (CGM.getTriple().isOSBinFormatCOFF()) {
     auto Storage = llvm::GlobalValue::DefaultStorageClass;
     if (OID->getClassInterface()->hasAttr<DLLImportAttr>())
