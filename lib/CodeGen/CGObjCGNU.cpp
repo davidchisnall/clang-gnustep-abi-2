@@ -2993,7 +2993,8 @@ llvm::Constant *CGObjCGNU::MakeBitField(ArrayRef<bool> bits) {
 }
 
 void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
-  std::string ClassName = OCD->getClassInterface()->getNameAsString();
+  const ObjCInterfaceDecl *Class = OCD->getClassInterface();
+  std::string ClassName = Class->getNameAsString();
   std::string CategoryName = OCD->getNameAsString();
   // Collect information about instance methods
   SmallVector<Selector, 16> InstanceMethodSels;
@@ -3038,24 +3039,17 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   // Protocol list
   Elements.addBitCast(GenerateProtocolList(Protocols), PtrTy);
   if (isRuntime(ObjCRuntime::GNUstep, 2)) {
-    SmallVector<Selector, 8> Sels;
-    SmallVector<llvm::Constant*, 8> Types;
-    auto numProperties = std::distance(CatDecl->instprop_begin(), CatDecl->instprop_end());
-    if (numProperties == 0)
+    const ObjCCategoryDecl *Category =
+      Class->FindCategoryDeclaration(OCD->getIdentifier());
+    if (Category) {
+      // Instance properties
+      Elements.addBitCast(GeneratePropertyList(OCD, Category, false), PtrTy);
+      // Class properties
+      Elements.addBitCast(GeneratePropertyList(OCD, Category, true), PtrTy);
+    } else {
       Elements.addNullPointer(PtrTy);
-    else  {
-      ConstantInitBuilder builder(CGM);
-      auto propertyList = builder.beginStruct();
-      auto properties = PushPropertyListHeader(propertyList, numProperties);
-      for (auto *property : CatDecl->instance_properties())
-        PushProperty(properties, property, OCD);
-      properties.finishAndAddTo(propertyList);
-
-      Elements.add(propertyList.finishAndCreateGlobal(".objc_property_list",
-                                                      CGM.getPointerAlign()));
+      Elements.addNullPointer(PtrTy);
     }
-    // FIXME: Class properties.
-    Elements.addNullPointer(PtrTy);
   }
 
   Categories.push_back(llvm::ConstantExpr::getBitCast(
