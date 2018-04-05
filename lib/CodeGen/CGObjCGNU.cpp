@@ -459,7 +459,8 @@ protected:
   /// pattern as method and instance variable metadata lists.
   llvm::Constant *GeneratePropertyList(const Decl *Container,
       const ObjCContainerDecl *OCD,
-      bool isClassProperty=false);
+      bool isClassProperty=false,
+      bool protocolOptionalProperties=false);
 
   /// Generates a list of referenced protocols.  Classes, categories, and
   /// protocols all use this structure.
@@ -604,11 +605,6 @@ public:
   void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) override;
   llvm::Value *GenerateProtocolRef(CodeGenFunction &CGF,
                                    const ObjCProtocolDecl *PD) override;
-  /// Helper that generates protocol lists from properties.
-  /// These structures are the same in GNUstep v1 and v2 ABIs, but the protocol
-  /// structures that enclose them are not.
-  std::pair<llvm::Constant*, llvm::Constant*>
-  GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD);
   void GenerateProtocol(const ObjCProtocolDecl *PD) override;
   llvm::Function *ModuleInitFunction() override;
   llvm::Constant *GetPropertyGetFunction() override;
@@ -1155,9 +1151,14 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     EmitProtocolMethodList(PD->class_methods(), ClassMethodList,
         OptionalClassMethodList);
 
-    llvm::Constant *PropertyList;
-    llvm::Constant *OptionalPropertyList;
-    std::tie(PropertyList, OptionalPropertyList) = GenerateProtocolPropertyLists(PD);
+    llvm::Constant *PropertyList =
+      GeneratePropertyList(nullptr, PD, false, false);
+    llvm::Constant *OptionalPropertyList =
+      GeneratePropertyList(nullptr, PD, false, true);
+    llvm::Constant *ClassPropertyList =
+      GeneratePropertyList(nullptr, PD, true, false);
+    llvm::Constant *OptionalClassPropertyList =
+      GeneratePropertyList(nullptr, PD, true, true);
 
     auto SymName = SymbolForProtocol(ProtocolName);
     auto *OldGV = TheModule.getGlobalVariable(SymName);
@@ -1168,7 +1169,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
             ProtocolVersion), IdTy), MakeConstantString(ProtocolName),
             ProtocolList, InstanceMethodList,
       ClassMethodList, OptionalInstanceMethodList, OptionalClassMethodList,
-      PropertyList, OptionalPropertyList}, llvm::GlobalValue::ExternalLinkage,
+      PropertyList, OptionalPropertyList, ClassPropertyList,
+      OptionalClassPropertyList}, llvm::GlobalValue::ExternalLinkage,
       true, ProtocolSection);
     GV->setAlignment(CGM.getPointerAlign().getQuantity());
     if (OldGV) {
@@ -1339,9 +1341,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       CGM.addUsedGlobal(Cls);
     }
     if (!EmittedProtocol) {
-      auto *NullProto = EmitRuntimeStruct(".objc_null_protocol", {NULLPtr, NULLPtr, NULLPtr,
-            NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
-            llvm::GlobalValue::ExternalLinkage, true, ProtocolSection);
+      auto *NullProto = EmitRuntimeStruct(".objc_null_protocol", {NULLPtr,
+          NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr,
+          NULLPtr, NULLPtr, NULLPtr}, llvm::GlobalValue::ExternalLinkage, true,
+          ProtocolSection);
       NullProto->setAlignment(CGM.getPointerAlign().getQuantity());
     }
     if (!EmittedProtocolRef) {
@@ -2796,50 +2799,6 @@ CGObjCGNU::GenerateEmptyProtocol(StringRef ProtocolName) {
                                         CGM.getPointerAlign());
 }
 
-
-std::pair<llvm::Constant*, llvm::Constant*>
-CGObjCGNU::GenerateProtocolPropertyLists(const ObjCProtocolDecl *PD) {
-  llvm::Constant *PropertyList;
-  llvm::Constant *OptionalPropertyList;
-
-  unsigned numReqProperties = 0, numOptProperties = 0;
-  for (auto property : PD->instance_properties()) {
-    if (property->isOptional())
-      numOptProperties++;
-    else
-      numReqProperties++;
-  }
-
-  ConstantInitBuilder reqPropertyListBuilder(CGM);
-  auto reqPropertiesList = reqPropertyListBuilder.beginStruct();
-  auto reqPropertiesArray = PushPropertyListHeader(reqPropertiesList,
-      numReqProperties);
-
-  ConstantInitBuilder optPropertyListBuilder(CGM);
-  auto optPropertiesList = optPropertyListBuilder.beginStruct();
-  auto optPropertiesArray = PushPropertyListHeader(optPropertiesList,
-      numOptProperties);
-
-  // Add all of the property methods need adding to the method list and to the
-  // property metadata list.
-  for (auto *property : PD->instance_properties()) {
-    auto &propertiesArray =
-      (property->isOptional() ? optPropertiesArray : reqPropertiesArray);
-    PushProperty(propertiesArray, property, nullptr);
-  }
-
-  reqPropertiesArray.finishAndAddTo(reqPropertiesList);
-  PropertyList =
-    reqPropertiesList.finishAndCreateGlobal(".objc_property_list",
-                                            CGM.getPointerAlign());
-
-  optPropertiesArray.finishAndAddTo(optPropertiesList);
-  OptionalPropertyList =
-    optPropertiesList.finishAndCreateGlobal(".objc_property_list",
-                                            CGM.getPointerAlign());
-  return { PropertyList, OptionalPropertyList };
-}
-
 void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   std::string ProtocolName = PD->getNameAsString();
   
@@ -2882,9 +2841,10 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   // simplify the runtime library by allowing it to use the same data
   // structures for protocol metadata everywhere.
 
-  llvm::Constant *PropertyList;
-  llvm::Constant *OptionalPropertyList;
-  std::tie(PropertyList, OptionalPropertyList) = GenerateProtocolPropertyLists(PD);
+  llvm::Constant *PropertyList =
+    GeneratePropertyList(nullptr, PD, false, false);
+  llvm::Constant *OptionalPropertyList =
+    GeneratePropertyList(nullptr, PD, false, true);
 
   // Protocols are objects containing lists of the methods implemented and
   // protocols adopted.
@@ -3061,10 +3021,13 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
 
 llvm::Constant *CGObjCGNU::GeneratePropertyList(const Decl *Container,
     const ObjCContainerDecl *OCD,
-    bool isClassProperty) {
+    bool isClassProperty,
+    bool protocolOptionalProperties) {
 
   SmallVector<const ObjCPropertyDecl *, 16> Properties;
   llvm::SmallPtrSet<const IdentifierInfo*, 16> PropertySet;
+  bool isProtocol = isa<ObjCProtocolDecl>(OCD);
+  ASTContext &Context = CGM.getContext();
 
   std::function<void(const ObjCProtocolDecl *Proto)> collectProtocolProperties
     = [&](const ObjCProtocolDecl *Proto) {
@@ -3072,6 +3035,10 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const Decl *Container,
         collectProtocolProperties(P);
       for (const auto *PD : Proto->properties()) {
         if (isClassProperty != PD->isClassProperty())
+          continue;
+        // Skip any properties that are declared in protocols that this class
+        // conforms to but are not actually implemented by this class.
+        if (!isProtocol && !Context.getObjCPropertyImplDeclForPropertyDecl(PD, Container))
           continue;
         if (!PropertySet.insert(PD->getIdentifier()).second)
           continue;
@@ -3091,10 +3058,15 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const Decl *Container,
   for (const auto *PD : OCD->properties()) {
     if (isClassProperty != PD->isClassProperty())
       continue;
+    // If we're generating a list for a protocol, skip optional / required ones
+    // when generating the other list.
+    if (isProtocol && (protocolOptionalProperties != PD->isOptional()))
+      continue;
     // Don't emit duplicate metadata for properties that were already in a
     // class extension.
     if (!PropertySet.insert(PD->getIdentifier()).second)
       continue;
+
     Properties.push_back(PD);
   }
 
@@ -3116,16 +3088,17 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const Decl *Container,
 
   // Add all of the property methods need adding to the method list and to the
   // property metadata list.
-  ASTContext &Context = CGM.getContext();
   for (auto *property : Properties) {
     bool isSynthesized = false;
     bool isDynamic = false;
-    auto *propertyImpl = Context.getObjCPropertyImplDeclForPropertyDecl(property, Container);
-    if (propertyImpl) {
-      isSynthesized = (propertyImpl->getPropertyImplementation() ==
-          ObjCPropertyImplDecl::Synthesize);
-      isDynamic = (propertyImpl->getPropertyImplementation() ==
-          ObjCPropertyImplDecl::Dynamic);
+    if (!isProtocol) {
+      auto *propertyImpl = Context.getObjCPropertyImplDeclForPropertyDecl(property, Container);
+      if (propertyImpl) {
+        isSynthesized = (propertyImpl->getPropertyImplementation() ==
+            ObjCPropertyImplDecl::Synthesize);
+        isDynamic = (propertyImpl->getPropertyImplementation() ==
+            ObjCPropertyImplDecl::Dynamic);
+      }
     }
     PushProperty(properties, property, Container, isSynthesized, isDynamic);
   }
