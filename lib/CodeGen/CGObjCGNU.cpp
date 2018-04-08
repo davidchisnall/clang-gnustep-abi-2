@@ -34,6 +34,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/ConvertUTF.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -889,19 +890,21 @@ class CGObjCGNUstep : public CGObjCGNU {
 /// cleans up a number of things that were added to work around 1980s linkers.
 class CGObjCGNUstep2 : public CGObjCGNUstep {
   /// The section for selectors.
-  const char *const SelSection = "__objc_selectors";
+  static constexpr const char *const SelSection = "__objc_selectors";
   /// The section for classes.
-  const char *const ClsSection = "__objc_classes";
+  static constexpr const char *const ClsSection = "__objc_classes";
   /// The section for references to classes.  
-  const char *const ClsRefSection = "__objc_class_refs";
+  static constexpr const char *const ClsRefSection = "__objc_class_refs";
   /// The section for categories.
-  const char *const CatSection = "__objc_cats";
+  static constexpr const char *const CatSection = "__objc_cats";
   /// The section for protocols.
-  const char *const ProtocolSection = "__objc_protocols";
+  static constexpr const char *const ProtocolSection = "__objc_protocols";
   /// The section for protocol references.
-  const char *const ProtocolRefSection = "__objc_protocol_refs";
+  static constexpr const char *const ProtocolRefSection = "__objc_protocol_refs";
   /// The section for class aliases
-  const char *const ClassAliasSection = "__objc_class_aliases";
+  static constexpr const char *const ClassAliasSection = "__objc_class_aliases";
+  /// The section for constexpr constant strings
+  static constexpr const char *const ConstantStringSection = "__objc_constant_string";
   /// The GCC ABI superclass message lookup function.  Takes a pointer to a
   /// structure describing the receiver and the class, and a selector as
   /// arguments.  Returns the IMP for the corresponding method.
@@ -954,6 +957,132 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     if (Section != StringRef())
       GV->setSection(Section);
     return GV;
+  }
+
+  ConstantAddress GenerateConstantString(const StringLiteral *SL) override {
+
+    std::string Str = SL->getString().str();
+    CharUnits Align = CGM.getPointerAlign();
+
+    // Look for an existing one
+    llvm::StringMap<llvm::Constant*>::iterator old = ObjCStrings.find(Str);
+    if (old != ObjCStrings.end())
+      return ConstantAddress(old->getValue(), Align);
+
+    bool isNonASCII = SL->containsNonAscii();
+   
+    if ((CGM.getTarget().getPointerWidth(0) == 64) &&
+        (SL->getLength() < 9) && !isNonASCII) {
+      // Tiny strings are (roughly):
+      //   struct
+      //   {
+      //     uintptr_t char0  :7;
+      //     uintptr_t char1  :7;
+      //     uintptr_t char2  :7;
+      //     uintptr_t char3  :7;
+      //     uintptr_t char4  :7;
+      //     uintptr_t char5  :7;
+      //     uintptr_t char6  :7;
+      //     uintptr_t char7  :7;
+      //     uintptr_t length :5;
+      //     uintptr_t tag    :3;
+      //   };
+      //   With a tag value of 4.
+      uint64_t str = 0;
+      // Fill in the characters
+      for (unsigned i=0 ; i<SL->getLength() ; i++)
+        str |= ((uint64_t)SL->getCodeUnit(i)) << (57 - (i*7));
+      // Fill in the length
+      str |= SL->getLength() << 3;
+      // Set the tag
+      str |= 4;
+      auto *ObjCStr = llvm::ConstantExpr::getIntToPtr(
+          llvm::ConstantInt::get(Int64Ty, str), IdTy);
+      ObjCStrings[Str] = ObjCStr;
+      return ConstantAddress(ObjCStr, Align);
+    }
+
+    StringRef StringClass = CGM.getLangOpts().ObjCConstantStringClass;
+
+    if (StringClass.empty()) StringClass = "NSConstantString";
+
+    std::string Sym = SymbolForClass(StringClass);
+
+    llvm::Constant *isa = TheModule.getNamedGlobal(Sym);
+
+    if (!isa)
+      isa = new llvm::GlobalVariable(TheModule, IdTy, /* isConstant */false,
+              llvm::GlobalValue::ExternalLinkage, nullptr, Sym);
+    else if (isa->getType() != PtrToIdTy)
+      isa = llvm::ConstantExpr::getBitCast(isa, PtrToIdTy);
+
+    //  struct
+    //  {
+    //    Class isa;
+    //    uint32_t flags;
+    //    uint32_t length; // Number of codepoints
+    //    uint32_t size; // Number of bytes
+    //    uint32_t hash;
+    //    const char *data;
+    //  };
+
+    ConstantInitBuilder Builder(CGM);
+    auto Fields = Builder.beginStruct();
+    Fields.add(isa);
+    // For now, all non-ASCII strings are represented as UTF-16.  As such, the
+    // number of bytes is simply double the number of UTF-16 codepoints.  In
+    // ASCII strings, the number of bytes is equal to the number of non-ASCII
+    // codepoints.
+    if (isNonASCII) {
+      unsigned NumBytes = Str.size();
+      SmallVector<llvm::UTF16, 128> ToBuf(NumBytes + 1); // +1 for ending nulls.
+      const llvm::UTF8 *FromPtr = (const llvm::UTF8 *)Str.data();
+      llvm::UTF16 *ToPtr = &ToBuf[0];
+      (void)llvm::ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes, &ToPtr,
+          ToPtr + NumBytes, llvm::strictConversion);
+      uint32_t StringLength = ToPtr - &ToBuf[0];
+      // Add null terminator
+      *ToPtr = 0;
+      // Flags: 2 indicates UTF-16 encoding
+      Fields.addInt(Int32Ty, 2);
+      // Number of UTF-16 codepoints
+      Fields.addInt(Int32Ty, StringLength);
+      // Number of bytes
+      Fields.addInt(Int32Ty, StringLength * 2);
+      // Hash.  Not currently initialised by the compiler.
+      Fields.addInt(Int32Ty, 0);
+      // pointer to the data string.
+      auto Arr = llvm::makeArrayRef(&ToBuf[0], ToPtr+1);
+      auto *C = llvm::ConstantDataArray::get(VMContext, Arr);
+      auto *Buffer = new llvm::GlobalVariable(TheModule, C->getType(),
+          /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, C, ".str");
+      Buffer->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+      Fields.add(Buffer);
+    } else {
+      // Flags: 0 indicates ASCII encoding
+      Fields.addInt(Int32Ty, 0);
+      // Number of UTF-16 codepoints, each ASCII byte is a UTF-16 codepoint
+      Fields.addInt(Int32Ty, Str.size());
+      // Number of bytes
+      Fields.addInt(Int32Ty, Str.size());
+      // Hash.  Not currently initialised by the compiler.
+      Fields.addInt(Int32Ty, 0);
+      // Data pointer
+      Fields.add(MakeConstantString(Str));
+    }
+    std::string StringName = ".objc_str_" + Str;
+    std::replace(StringName.begin(), StringName.end(),
+      '@', '\1');
+    auto *ObjCStrGV =
+      Fields.finishAndCreateGlobal(StringName, Align);
+    ObjCStrGV->setSection(ConstantStringSection);
+    ObjCStrGV->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    ObjCStrGV->setComdat(TheModule.getOrInsertComdat(StringName));
+    ObjCStrGV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    llvm::Constant *ObjCStr = llvm::ConstantExpr::getBitCast(ObjCStrGV, IdTy);
+    ObjCStrings[Str] = ObjCStr;
+    ConstantStrings.push_back(ObjCStr);
+    return ConstantAddress(ObjCStr, Align);
   }
 
   void PushProperty(ConstantArrayBuilder &PropertiesArray,
@@ -1274,11 +1403,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     auto *ProtocolRefEnd = GetSectionStop(ProtocolRefSection);
     auto *ClassAliasStart = GetSectionStart(ClassAliasSection);
     auto *ClassAliasEnd = GetSectionStop(ClassAliasSection);
+    auto *ConstantStringStart = GetSectionStart(ConstantStringSection);
+    auto *ConstantStringEnd = GetSectionStop(ConstantStringSection);
     auto *InitStruct = EmitRuntimeStruct(".objc_init",
         {llvm::ConstantInt::get(Int64Ty, 0), SelStart, SelEnd, ClsStart,
         ClsEnd, ClsRefStart, ClsRefEnd, CatStart, CatEnd, ProtocolStart,
         ProtocolEnd, ProtocolRefStart, ProtocolRefEnd, ClassAliasStart,
-        ClassAliasEnd},
+        ClassAliasEnd, ConstantStringStart, ConstantStringEnd},
         llvm::GlobalValue::ExternalLinkage, true);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
     InitStruct->setComdat(TheModule.getOrInsertComdat(".objc_init"));
@@ -1365,6 +1496,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         { NULLPtr, NULLPtr }, llvm::GlobalValue::ExternalLinkage, true,
         ClassAliasSection );
       NullClassRef->setAlignment(CGM.getPointerAlign().getQuantity());
+    }
+    if (ConstantStrings.empty()) {
+      auto *NullConstantString = EmitRuntimeStruct(".objc_null_constant_string",
+        { NULLPtr, NULLPtr, llvm::ConstantInt::get(IntTy, 0) }, llvm::GlobalValue::ExternalLinkage, true,
+        ConstantStringSection);
+      NullConstantString->setAlignment(CGM.getPointerAlign().getQuantity());
     }
     ConstantStrings.clear();
     Categories.clear();
