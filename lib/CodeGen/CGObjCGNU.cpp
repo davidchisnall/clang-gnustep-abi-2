@@ -1571,43 +1571,12 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     if (OID->classmeth_begin() == OID->classmeth_end())
       metaclassFields.addNullPointer(PtrTy);
     else {
-      ConstantInitBuilder b(CGM);
-      auto methodListBuilder = b.beginStruct();
-      // struct objc_method_list *next;
-      methodListBuilder.addNullPointer(PtrTy);
-      // int count;
-      methodListBuilder.addInt(IntTy, std::distance(OID->classmeth_begin(),
-                                                    OID->classmeth_end()));
-      // size_t size;
-      llvm::StructType *MethodTy = llvm::StructType::get(
-        PtrTy,
-        PtrTy,
-        PtrTy);
-      llvm::DataLayout td(&TheModule);
-      methodListBuilder.addInt(SizeTy, td.getTypeSizeInBits(MethodTy) /
-          CGM.getContext().getCharWidth());
-      auto methodArrayBuilder = methodListBuilder.beginArray();
-      for (const auto *I : OID->class_methods()) {
-        auto methodBuilder = methodArrayBuilder.beginStruct();
-        // IMP imp;
-        llvm::Constant *FnPtr =
-          TheModule.getFunction(SymbolNameForMethod(className, "",
-                                                    I->getSelector(),
-                                                    /*isClassMethod*/true));
-        assert(FnPtr && "Can't generate metadata for method that doesn't exist");
-        methodBuilder.addBitCast(FnPtr, IMPTy);
-        // SEL selector
-        methodBuilder.add(CGObjCGNU::GetConstantSelector(I));
-        // const char *types;
-        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(I,
-              true)));
-        methodBuilder.finishAndAddTo(methodArrayBuilder);
-      }
-      methodArrayBuilder.finishAndAddTo(methodListBuilder);
-      auto methodList = methodListBuilder.finishAndCreateGlobal(".objc_method_list",
-          CGM.getPointerAlign(), /*constant*/ false, 
-          llvm::GlobalValue::PrivateLinkage);
-      metaclassFields.add(methodList);
+      SmallVector<ObjCMethodDecl*, 16> ClassMethods;
+      ClassMethods.insert(ClassMethods.begin(), OID->classmeth_begin(),
+          OID->classmeth_end());
+      metaclassFields.addBitCast(
+              GenerateMethodList(className, "", ClassMethods, true),
+              PtrTy);
     }
     // void *dtable;
     metaclassFields.addNullPointer(PtrTy);
@@ -1732,72 +1701,27 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       classFields.add(ivarList);
     }
     // struct objc_method_list *methods
-    auto method_count = std::distance(OID->instmeth_begin(), OID->instmeth_end());
+    SmallVector<const ObjCMethodDecl*, 16> InstanceMethods;
+    InstanceMethods.insert(InstanceMethods.begin(), OID->instmeth_begin(),
+        OID->instmeth_end());
     for (auto *propImpl : OID->property_impls())
       if (propImpl->getPropertyImplementation() ==
           ObjCPropertyImplDecl::Synthesize) {
         ObjCPropertyDecl *prop = propImpl->getPropertyDecl();
-        if (prop->getGetterMethodDecl())
-          method_count++;
-        if (prop->getSetterMethodDecl())
-          method_count++;
+        auto addIfExists = [&](const ObjCMethodDecl* OMD) {
+          if (OMD)
+            InstanceMethods.push_back(OMD);
+        };
+        addIfExists(prop->getGetterMethodDecl());
+        addIfExists(prop->getSetterMethodDecl());
       }
 
-    if (method_count == 0)
+    if (InstanceMethods.size() == 0)
       classFields.addNullPointer(PtrTy);
-    else {
-      ConstantInitBuilder b(CGM);
-      auto methodListBuilder = b.beginStruct();
-      auto methods =  OID->instance_methods();
-      // struct objc_method_list *next;
-      methodListBuilder.addNullPointer(PtrTy);
-      // int count;
-      methodListBuilder.addInt(IntTy, method_count);
-      // size_t size;
-      llvm::StructType *MethodTy = llvm::StructType::get(
-        PtrTy,
-        PtrTy,
-        PtrTy);
-      llvm::DataLayout td(&TheModule);
-      methodListBuilder.addInt(SizeTy, td.getTypeSizeInBits(MethodTy) /
-          CGM.getContext().getCharWidth());
-      auto methodArrayBuilder = methodListBuilder.beginArray();
-      auto addMethod = [&](const ObjCMethodDecl *method) {
-        if (!method)
-          return;
-        auto methodBuilder = methodArrayBuilder.beginStruct();
-        // IMP imp;
-        llvm::Constant *FnPtr =
-          TheModule.getFunction(SymbolNameForMethod(className, "",
-                                                    method->getSelector(),
-                                                    /*isClassMethod*/false));
-        assert(FnPtr && "Can't generate metadata for method that doesn't exist");
-        methodBuilder.addBitCast(FnPtr, IMPTy);
-        // SEL selector
-        methodBuilder.add(CGObjCGNU::GetConstantSelector(method));
-        // const char *types;
-        methodBuilder.add(GetTypeString(Context.getObjCEncodingForMethodDecl(method,
-              true)));
-        methodBuilder.finishAndAddTo(methodArrayBuilder);
-      };
-
-      for (const auto *method : methods) {
-        addMethod(method);
-      }
-      for (auto *propImpl : OID->property_impls()) {
-        if (propImpl->getPropertyImplementation() ==
-            ObjCPropertyImplDecl::Synthesize) {
-          ObjCPropertyDecl *prop = propImpl->getPropertyDecl();
-          addMethod(prop->getGetterMethodDecl());
-          addMethod(prop->getSetterMethodDecl());
-        }
-      }
-      methodArrayBuilder.finishAndAddTo(methodListBuilder);
-      auto methodList = methodListBuilder.finishAndCreateGlobal(".objc_method_list",
-          CGM.getPointerAlign(), /*constant*/ false, 
-          llvm::GlobalValue::PrivateLinkage);
-      classFields.add(methodList);
-    }
+    else
+      classFields.addBitCast(
+              GenerateMethodList(className, "", InstanceMethods, false),
+              PtrTy);
     // void *dtable;
     classFields.addNullPointer(PtrTy);
     // IMP cxx_construct;
