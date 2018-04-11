@@ -447,8 +447,7 @@ protected:
   /// pointer allowing them to be chained together in a linked list.
   llvm::Constant *GenerateMethodList(StringRef ClassName,
       StringRef CategoryName,
-      ArrayRef<Selector> MethodSels,
-      ArrayRef<llvm::Constant *> MethodTypes,
+      ArrayRef<const ObjCMethodDecl*> Methods,
       bool isClassMethodList);
 
   /// Emits an empty protocol.  This is used for \@protocol() where no protocol
@@ -2642,17 +2641,16 @@ CGObjCGNU::GenerateMessageSend(CodeGenFunction &CGF,
 llvm::Constant *CGObjCGNU::
 GenerateMethodList(StringRef ClassName,
                    StringRef CategoryName,
-                   ArrayRef<Selector> MethodSels,
-                   ArrayRef<llvm::Constant *> MethodTypes,
+                   ArrayRef<const ObjCMethodDecl*> Methods,
                    bool isClassMethodList) {
-  if (MethodSels.empty())
+  if (Methods.empty())
     return NULLPtr;
 
   ConstantInitBuilder Builder(CGM);
 
   auto MethodList = Builder.beginStruct();
   MethodList.addNullPointer(CGM.Int8PtrTy);
-  MethodList.addInt(Int32Ty, MethodTypes.size());
+  MethodList.addInt(Int32Ty, Methods.size());
 
   // Get the method structure type.
   llvm::StructType *ObjCMethodTy =
@@ -2681,23 +2679,28 @@ GenerateMethodList(StringRef ClassName,
         IMPTy        // Method pointer
       });
   }
-  auto Methods = MethodList.beginArray();
-  for (unsigned int i = 0, e = MethodTypes.size(); i < e; ++i) {
+  auto MethodArray = MethodList.beginArray();
+  ASTContext &Context = CGM.getContext();
+  for (const auto *OMD : Methods) {
     llvm::Constant *FnPtr =
       TheModule.getFunction(SymbolNameForMethod(ClassName, CategoryName,
-                                                MethodSels[i],
+                                                OMD->getSelector(),
                                                 isClassMethodList));
     assert(FnPtr && "Can't generate metadata for method that doesn't exist");
-    auto Method = Methods.beginStruct(ObjCMethodTy);
-    if (isV2ABI)
+    auto Method = MethodArray.beginStruct(ObjCMethodTy);
+    if (isV2ABI) {
       Method.addBitCast(FnPtr, IMPTy);
-    Method.add(MakeConstantString(MethodSels[i].getAsString()));
-    Method.add(MethodTypes[i]);
-    if (!isV2ABI)
+      Method.add(GetConstantSelector(OMD->getSelector(),
+          Context.getObjCEncodingForMethodDecl(OMD)));
+      Method.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(OMD, true)));
+    } else {
+      Method.add(MakeConstantString(OMD->getSelector().getAsString()));
+      Method.add(MakeConstantString(Context.getObjCEncodingForMethodDecl(OMD)));
       Method.addBitCast(FnPtr, IMPTy);
-    Method.finishAndAddTo(Methods);
+    }
+    Method.finishAndAddTo(MethodArray);
   }
-  Methods.finishAndAddTo(MethodList);
+  MethodArray.finishAndAddTo(MethodList);
 
   // Create an instance of the structure
   return MethodList.finishAndCreateGlobal(".objc_method_list",
@@ -3007,8 +3010,6 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
 }
 void CGObjCGNU::GenerateProtocolHolderCategory() {
   // Collect information about instance methods
-  SmallVector<Selector, 1> MethodSels;
-  SmallVector<llvm::Constant*, 1> MethodTypes;
 
   ConstantInitBuilder Builder(CGM);
   auto Elements = Builder.beginStruct();
@@ -3019,10 +3020,10 @@ void CGObjCGNU::GenerateProtocolHolderCategory() {
   Elements.add(MakeConstantString(ClassName));
   // Instance method list
   Elements.addBitCast(GenerateMethodList(
-          ClassName, CategoryName, MethodSels, MethodTypes, false), PtrTy);
+          ClassName, CategoryName, {}, false), PtrTy);
   // Class method list
   Elements.addBitCast(GenerateMethodList(
-          ClassName, CategoryName, MethodSels, MethodTypes, true), PtrTy);
+          ClassName, CategoryName, {}, true), PtrTy);
 
   // Protocol list
   ConstantInitBuilder ProtocolListBuilder(CGM);
@@ -3093,23 +3094,6 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   const ObjCInterfaceDecl *Class = OCD->getClassInterface();
   std::string ClassName = Class->getNameAsString();
   std::string CategoryName = OCD->getNameAsString();
-  // Collect information about instance methods
-  SmallVector<Selector, 16> InstanceMethodSels;
-  SmallVector<llvm::Constant*, 16> InstanceMethodTypes;
-  for (const auto *I : OCD->instance_methods()) {
-    InstanceMethodSels.push_back(I->getSelector());
-    std::string TypeStr = CGM.getContext().getObjCEncodingForMethodDecl(I);
-    InstanceMethodTypes.push_back(MakeConstantString(TypeStr));
-  }
-
-  // Collect information about class methods
-  SmallVector<Selector, 16> ClassMethodSels;
-  SmallVector<llvm::Constant*, 16> ClassMethodTypes;
-  for (const auto *I : OCD->class_methods()) {
-    ClassMethodSels.push_back(I->getSelector());
-    std::string TypeStr = CGM.getContext().getObjCEncodingForMethodDecl(I);
-    ClassMethodTypes.push_back(MakeConstantString(TypeStr));
-  }
 
   // Collect the names of referenced protocols
   SmallVector<std::string, 16> Protocols;
@@ -3124,14 +3108,19 @@ void CGObjCGNU::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   Elements.add(MakeConstantString(CategoryName));
   Elements.add(MakeConstantString(ClassName));
   // Instance method list
+  SmallVector<ObjCMethodDecl*, 16> InstanceMethods;
+  InstanceMethods.insert(InstanceMethods.begin(), OCD->instmeth_begin(),
+      OCD->instmeth_end());
   Elements.addBitCast(
-          GenerateMethodList(ClassName, CategoryName, InstanceMethodSels,
-                             InstanceMethodTypes, false),
+          GenerateMethodList(ClassName, CategoryName, InstanceMethods, false),
           PtrTy);
   // Class method list
+
+  SmallVector<ObjCMethodDecl*, 16> ClassMethods;
+  ClassMethods.insert(ClassMethods.begin(), OCD->classmeth_begin(),
+      OCD->classmeth_end());
   Elements.addBitCast(
-          GenerateMethodList(ClassName, CategoryName, ClassMethodSels,
-                             ClassMethodTypes, true),
+          GenerateMethodList(ClassName, CategoryName, ClassMethods, true),
           PtrTy);
   // Protocol list
   Elements.addBitCast(GenerateProtocolList(Protocols), PtrTy);
@@ -3363,13 +3352,13 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
                                            CGM.getPointerAlign());
 
   // Collect information about instance methods
-  SmallVector<Selector, 16> InstanceMethodSels;
-  SmallVector<llvm::Constant*, 16> InstanceMethodTypes;
-  for (const auto *I : OID->instance_methods()) {
-    InstanceMethodSels.push_back(I->getSelector());
-    std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
-    InstanceMethodTypes.push_back(MakeConstantString(TypeStr));
-  }
+  SmallVector<const ObjCMethodDecl*, 16> InstanceMethods;
+  InstanceMethods.insert(InstanceMethods.begin(), OID->instmeth_begin(),
+      OID->instmeth_end());
+
+  SmallVector<const ObjCMethodDecl*, 16> ClassMethods;
+  ClassMethods.insert(ClassMethods.begin(), OID->classmeth_begin(),
+      OID->classmeth_end());
 
   // Collect the same information about synthesized properties, which don't
   // show up in the instance method lists.
@@ -3378,11 +3367,8 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
         ObjCPropertyImplDecl::Synthesize) {
       ObjCPropertyDecl *property = propertyImpl->getPropertyDecl();
       auto addPropertyMethod = [&](const ObjCMethodDecl *accessor) {
-        if (accessor) {
-          InstanceMethodTypes.push_back(MakeConstantString(
-              Context.getObjCEncodingForMethodDecl(accessor)));
-          InstanceMethodSels.push_back(accessor->getSelector());
-        }
+        if (accessor)
+          InstanceMethods.push_back(accessor);
       };
       addPropertyMethod(property->getGetterMethodDecl());
       addPropertyMethod(property->getSetterMethodDecl());
@@ -3390,14 +3376,6 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
 
   llvm::Constant *Properties = GeneratePropertyList(OID, ClassDecl);
 
-  // Collect information about class methods
-  SmallVector<Selector, 16> ClassMethodSels;
-  SmallVector<llvm::Constant*, 16> ClassMethodTypes;
-  for (const auto *I : OID->class_methods()) {
-    ClassMethodSels.push_back(I->getSelector());
-    std::string TypeStr = Context.getObjCEncodingForMethodDecl(I);
-    ClassMethodTypes.push_back(MakeConstantString(TypeStr));
-  }
   // Collect the names of referenced protocols
   SmallVector<std::string, 16> Protocols;
   for (const auto *I : ClassDecl->protocols())
@@ -3414,9 +3392,9 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   SmallVector<llvm::Constant*, 1>  empty;
   // Generate the method and instance variable lists
   llvm::Constant *MethodList = GenerateMethodList(ClassName, "",
-      InstanceMethodSels, InstanceMethodTypes, false);
+      InstanceMethods, false);
   llvm::Constant *ClassMethodList = GenerateMethodList(ClassName, "",
-      ClassMethodSels, ClassMethodTypes, true);
+      ClassMethods, true);
   llvm::Constant *IvarList = GenerateIvarList(IvarNames, IvarTypes,
       IvarOffsets, IvarAligns, IvarOwnership);
   // Irrespective of whether we are compiling for a fragile or non-fragile ABI,
