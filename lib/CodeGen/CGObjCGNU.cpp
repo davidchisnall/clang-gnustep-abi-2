@@ -1509,9 +1509,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
                               const ObjCInterfaceDecl *Interface,
                               const ObjCIvarDecl *Ivar) override {
     const std::string Name = GetIVarOffsetVariableName(Ivar->getContainingInterface(), Ivar);
-    // Emit the variable and initialize it with what we think the correct value
-    // is.  This allows code compiled with non-fragile ivars to work correctly
-    // when linked against code which isn't (most of the time).
     llvm::GlobalVariable *IvarOffsetPointer = TheModule.getNamedGlobal(Name);
     if (!IvarOffsetPointer)
       IvarOffsetPointer = new llvm::GlobalVariable(TheModule, IntTy, false,
