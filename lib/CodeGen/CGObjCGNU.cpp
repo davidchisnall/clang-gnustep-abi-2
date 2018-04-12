@@ -1354,7 +1354,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     auto *Name = ExportUniqueString(Sel.getAsString(), ".objc_sel_name_", true);
     llvm::Constant *Types = GetTypeString(TypeEncoding);
     auto *GV = EmitRuntimeStruct(SelVarName, {Name, Types},
-        llvm::GlobalValue::ExternalLinkage, true, SelSection);
+        llvm::GlobalValue::LinkOnceODRLinkage, true, SelSection);
     GV->setComdat(TheModule.getOrInsertComdat(SelVarName));
     GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
     auto *SelVal = EnforceType(GV, SelectorTy);
@@ -1379,7 +1379,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   llvm::Function *ModuleInitFunction() override {
     llvm::Function *LoadFunction = llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), false),
-      llvm::GlobalValue::ExternalLinkage, ".objcv2_load_function",
+      llvm::GlobalValue::LinkOnceODRLinkage, ".objcv2_load_function",
       &TheModule);
     LoadFunction->setVisibility(llvm::GlobalValue::HiddenVisibility);
     LoadFunction->setComdat(TheModule.getOrInsertComdat(".objcv2_load_function"));
@@ -1409,7 +1409,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         ClsEnd, ClsRefStart, ClsRefEnd, CatStart, CatEnd, ProtocolStart,
         ProtocolEnd, ProtocolRefStart, ProtocolRefEnd, ClassAliasStart,
         ClassAliasEnd, ConstantStringStart, ConstantStringEnd},
-        llvm::GlobalValue::ExternalLinkage, true);
+        llvm::GlobalValue::LinkOnceODRLinkage, true);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
     InitStruct->setComdat(TheModule.getOrInsertComdat(".objc_init"));
     CallRuntimeFunction(B, "__objc_load", {InitStruct});;
