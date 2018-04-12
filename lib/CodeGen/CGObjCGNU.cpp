@@ -1445,43 +1445,32 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // Add a null value fore each special section so that we can always
     // guarantee that the _start and _stop symbols will exist and be
     // meaningful.
-    //if (Classes.empty()) {
-      auto *Cls = new llvm::GlobalVariable(TheModule, PtrTy, false,
-          llvm::GlobalValue::LinkOnceODRLinkage, NULLPtr, 
-          ".objc_null_cls_init_ref");
-      Cls->setSection(ClsRefSection);
-      Cls->setVisibility(llvm::GlobalValue::HiddenVisibility);
-      CGM.addUsedGlobal(Cls);
-    //}
-    EmitRuntimeStruct(".objc_null_selector", {NULLPtr, NULLPtr},
-        llvm::GlobalValue::ExternalLinkage, true, SelSection);
-    if (Categories.empty()) {
-      auto *Cat = EmitRuntimeStruct(".objc_null_category", {NULLPtr, NULLPtr,
-          NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr},
-          llvm::GlobalValue::LinkOnceODRLinkage, true, CatSection);
-      Cat->setAlignment(CGM.getPointerAlign().getQuantity());
-      Cat->setSection(CatSection);
-      CGM.addUsedGlobal(Cat);
-    }
+    auto createNullGlobal = [&](StringRef Name, ArrayRef<llvm::Constant*> Init,
+        StringRef Section) {
+      auto *GV = EmitRuntimeStruct(Name, Init,
+          llvm::GlobalValue::LinkOnceODRLinkage, true, Section);
+      GV->setAlignment(CGM.getPointerAlign().getQuantity());
+      GV->setSection(Section);
+      GV->setComdat(TheModule.getOrInsertComdat(Name));
+      CGM.addUsedGlobal(GV);
+      GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+      return GV;
+    };
+    createNullGlobal(".objc_null_selector", {NULLPtr, NULLPtr}, SelSection);
+    if (Categories.empty())
+      createNullGlobal(".objc_null_category", {NULLPtr, NULLPtr,
+                    NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr}, CatSection);
     if (Classes.empty()) {
-      auto *Cls = new llvm::GlobalVariable(TheModule, PtrTy,
-          false, llvm::GlobalValue::LinkOnceODRLinkage, NULLPtr, 
-          ".objc_null_cls_init_ref");
-      Cls->setSection(ClsSection);
-      CGM.addUsedGlobal(Cls);
+      createNullGlobal(".objc_null_cls_init_ref", NULLPtr, ClsSection);
+      createNullGlobal(".objc_null_class_ref", { NULLPtr, NULLPtr },
+          ClsRefSection);
     }
-    if (!EmittedProtocol) {
-      auto *NullProto = EmitRuntimeStruct(".objc_null_protocol", {NULLPtr,
+    if (!EmittedProtocol)
+      createNullGlobal(".objc_null_protocol", {NULLPtr, NULLPtr, NULLPtr,
           NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr,
-          NULLPtr, NULLPtr, NULLPtr}, llvm::GlobalValue::ExternalLinkage, true,
-          ProtocolSection);
-      NullProto->setAlignment(CGM.getPointerAlign().getQuantity());
-    }
-    if (!EmittedProtocolRef) {
-      auto *NullProtoRef = EmitRuntimeStruct(".objc_null_protocol_ref", {NULLPtr},
-            llvm::GlobalValue::ExternalLinkage, true, ProtocolRefSection);
-      NullProtoRef->setAlignment(CGM.getPointerAlign().getQuantity());
-    }
+          NULLPtr}, ProtocolSection);
+    if (!EmittedProtocolRef)
+      createNullGlobal(".objc_null_protocol_ref", {NULLPtr}, ProtocolRefSection);
     if (!ClassAliases.empty())
       for (auto clsAlias : ClassAliases) {
         auto alias = EmitRuntimeStruct(std::string(".objc_class_alias") +
@@ -1490,17 +1479,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
             true, ClassAliasSection);
         alias->setAlignment(CGM.getPointerAlign().getQuantity());
       }
-    else {
-      auto *NullClassRef = EmitRuntimeStruct(".objc_null_class_ref",
-        { NULLPtr, NULLPtr }, llvm::GlobalValue::ExternalLinkage, true,
-        ClassAliasSection );
-      NullClassRef->setAlignment(CGM.getPointerAlign().getQuantity());
-    }
+    else
+      createNullGlobal(".objc_null_class_alias", { NULLPtr, NULLPtr },
+          ClassAliasSection);
     if (ConstantStrings.empty()) {
-      auto *NullConstantString = EmitRuntimeStruct(".objc_null_constant_string",
-        { NULLPtr, NULLPtr, llvm::ConstantInt::get(IntTy, 0) }, llvm::GlobalValue::ExternalLinkage, true,
-        ConstantStringSection);
-      NullConstantString->setAlignment(CGM.getPointerAlign().getQuantity());
+      auto i32Zero = llvm::ConstantInt::get(Int32Ty, 0);
+      createNullGlobal(".objc_null_constant_string", { NULLPtr, i32Zero,
+          i32Zero, i32Zero, i32Zero, NULLPtr }, ConstantStringSection);
     }
     ConstantStrings.clear();
     Categories.clear();
