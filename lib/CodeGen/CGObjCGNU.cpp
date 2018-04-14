@@ -1627,7 +1627,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       ConstantInitBuilder b(CGM);
       auto ivarListBuilder = b.beginStruct();
       // int count;
-      ivarListBuilder.addInt(IntTy, classDecl->ivar_size());
+      ivarListBuilder.addInt(IntTy, ivar_count);
       // size_t size;
       llvm::StructType *ObjCIvarTy = llvm::StructType::get(
         PtrToInt8Ty,
