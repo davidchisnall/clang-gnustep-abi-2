@@ -1662,6 +1662,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
           OffsetVar = new llvm::GlobalVariable(TheModule, IntTy,
             false, llvm::GlobalValue::ExternalLinkage,
             OffsetValue, OffsetName);
+        auto ivarVisibility = 
+            (IVD->getAccessControl() == ObjCIvarDecl::Private ||
+             IVD->getAccessControl() == ObjCIvarDecl::Package ||
+             classDecl->getVisibility() == HiddenVisibility) ?
+                    llvm::GlobalValue::HiddenVisibility :
+                    llvm::GlobalValue::DefaultVisibility;
+        OffsetVar->setVisibility(ivarVisibility);
         ivarBuilder.add(OffsetVar);
         // Alignment will be stored as a base-2 log of the alignment.
         int align = llvm::Log2_32(Context.getTypeAlignInChars(ivarTy).getQuantity());
