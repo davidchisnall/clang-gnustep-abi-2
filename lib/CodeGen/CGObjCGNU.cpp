@@ -1231,7 +1231,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       // Emit a reference symbol.
       auto GV = new llvm::GlobalVariable(TheModule, ProtocolPtrTy,
           false, llvm::GlobalValue::ExternalLinkage,
-          llvm::ConstantExpr::getBitCast(Protocol, ProtocolPtrTy), Name);
+          llvm::ConstantExpr::getBitCast(Protocol, ProtocolPtrTy), RefName);
       GV->setSection(ProtocolRefSection);
       GV->setAlignment(CGM.getPointerAlign().getQuantity());
       Ref = GV;
