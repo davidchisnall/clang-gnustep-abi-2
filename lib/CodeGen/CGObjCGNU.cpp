@@ -190,7 +190,7 @@ protected:
   }
 
   std::string SymbolForProtocolRef(StringRef Name) {
-    return (StringRef("._OBJC_PROTOCOL_REF_") + Name).str();
+    return (StringRef("._OBJC_REF_PROTOCOL_") + Name).str();
   }
 
 

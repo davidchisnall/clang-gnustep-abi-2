@@ -24,7 +24,7 @@
 // indirection variable.
 // CHECK: @._OBJC_PROTOCOL_X = global 
 // CHECK-SAME: , section "__objc_protocols", comdat, align 8
-// CHECK: @._OBJC_PROTOCOL_REF_X = global 
+// CHECK: @._OBJC_REF_PROTOCOL_X = global 
 // CHECK-SAME: @._OBJC_PROTOCOL_X
 // CHECK-SAME: , section "__objc_protocol_refs", align 8
 
@@ -32,7 +32,7 @@
 // Check that we load from the indirection variable on protocol references.
 // CHECK: define i8* @x()
 // CHECK:   = load 
-// CHECK-SAME: @._OBJC_PROTOCOL_REF_X, align 8
+// CHECK-SAME: @._OBJC_REF_PROTOCOL_X, align 8
 void *x()
 {
 	return @protocol(X);
