@@ -70,7 +70,7 @@ def analyzer_opt_analyze_nested_blocks : Flag<["-"], "analyzer-opt-analyze-neste
 def analyzer_display_progress : Flag<["-"], "analyzer-display-progress">,
   HelpText<"Emit verbose output about the analyzer's progress">;
 def analyze_function : Separate<["-"], "analyze-function">,
-  HelpText<"Run analysis on specific function">;
+  HelpText<"Run analysis on specific function (for C++ include parameters in name)">;
 def analyze_function_EQ : Joined<["-"], "analyze-function=">, Alias<analyze_function>;
 def analyzer_eagerly_assume : Flag<["-"], "analyzer-eagerly-assume">,
   HelpText<"Eagerly assume the truth/falseness of some symbolic constraints">;
@@ -200,6 +200,12 @@ def arange_sections : Flag<["-"], "arange_sections">,
 def dwarf_ext_refs : Flag<["-"], "dwarf-ext-refs">,
   HelpText<"Generate debug info with external references to clang modules"
            " or precompiled headers">;
+def dwarf_explicit_import : Flag<["-"], "dwarf-explicit-import">,
+  HelpText<"Generate explicit import from anonymous namespace to containing"
+           " scope">;
+def debug_forward_template_params : Flag<["-"], "debug-forward-template-params">,
+  HelpText<"Emit complete descriptions of template parameters in forward"
+           " declarations">;
 def fforbid_guard_variables : Flag<["-"], "fforbid-guard-variables">,
   HelpText<"Emit an error if a C++ static local initializer would need a guard variable">;
 def no_implicit_float : Flag<["-"], "no-implicit-float">,
@@ -238,6 +244,8 @@ def relaxed_aliasing : Flag<["-"], "relaxed-aliasing">,
   HelpText<"Turn off Type Based Alias Analysis">;
 def no_struct_path_tbaa : Flag<["-"], "no-struct-path-tbaa">,
   HelpText<"Turn off struct-path aware Type Based Alias Analysis">;
+def new_struct_path_tbaa : Flag<["-"], "new-struct-path-tbaa">,
+  HelpText<"Enable enhanced struct-path aware Type Based Alias Analysis">;
 def masm_verbose : Flag<["-"], "masm-verbose">,
   HelpText<"Generate verbose assembly output">;
 def mcode_model : Separate<["-"], "mcode-model">,
@@ -255,16 +263,18 @@ def menable_no_nans : Flag<["-"], "menable-no-nans">,
 def menable_unsafe_fp_math : Flag<["-"], "menable-unsafe-fp-math">,
   HelpText<"Allow unsafe floating-point math optimizations which may decrease "
            "precision">;
+def mreassociate : Flag<["-"], "mreassociate">,
+  HelpText<"Allow reassociation transformations for floating-point instructions">;
 def mfloat_abi : Separate<["-"], "mfloat-abi">,
   HelpText<"The float ABI to use">;
+def mtp : Separate<["-"], "mtp">,
+  HelpText<"Mode for reading thread pointer">;
 def mlimit_float_precision : Separate<["-"], "mlimit-float-precision">,
   HelpText<"Limit float precision to the given value">;
 def split_stacks : Flag<["-"], "split-stacks">,
   HelpText<"Try to use a split stack if possible.">;
 def mno_zero_initialized_in_bss : Flag<["-"], "mno-zero-initialized-in-bss">,
   HelpText<"Do not put zero initialized data in the BSS">;
-def backend_option : Separate<["-"], "backend-option">,
-  HelpText<"Additional arguments to forward to LLVM backend (during code gen)">;
 def mregparm : Separate<["-"], "mregparm">,
   HelpText<"Limit the number of registers available for integer arguments">;
 def munwind_tables : Flag<["-"], "munwind-tables">,
@@ -390,8 +400,12 @@ def fcaret_diagnostics_max_lines :
   HelpText<"Set the maximum number of source lines to show in a caret diagnostic">;
 def fmessage_length : Separate<["-"], "fmessage-length">, MetaVarName<"<N>">,
   HelpText<"Format message diagnostics so that they fit within N columns or fewer, when possible.">;
+def verify_EQ : CommaJoined<["-"], "verify=">,
+  MetaVarName<"<prefixes>">,
+  HelpText<"Verify diagnostic output using comment directives that start with"
+           " prefixes in the comma-separated sequence <prefixes>">;
 def verify : Flag<["-"], "verify">,
-  HelpText<"Verify diagnostic output using comment directives">;
+  HelpText<"Equivalent to -verify=expected">;
 def verify_ignore_unexpected : Flag<["-"], "verify-ignore-unexpected">,
   HelpText<"Ignore unexpected diagnostic messages">;
 def verify_ignore_unexpected_EQ : CommaJoined<["-"], "verify-ignore-unexpected=">,
@@ -427,6 +441,8 @@ def code_completion_patterns : Flag<["-"], "code-completion-patterns">,
   HelpText<"Include code patterns in code-completion results">;
 def no_code_completion_globals : Flag<["-"], "no-code-completion-globals">,
   HelpText<"Do not include global declarations in code-completion results.">;
+def no_code_completion_ns_level_decls : Flag<["-"], "no-code-completion-ns-level-decls">,
+  HelpText<"Do not include declarations inside namespaces (incl. global namespace) in the code-completion results.">;
 def code_completion_brief_comments : Flag<["-"], "code-completion-brief-comments">,
   HelpText<"Include brief documentation comments in code-completion results.">;
 def disable_free : Flag<["-"], "disable-free">,
@@ -515,6 +531,8 @@ def ast_dump : Flag<["-"], "ast-dump">,
   HelpText<"Build ASTs and then debug dump them">;
 def ast_dump_all : Flag<["-"], "ast-dump-all">,
   HelpText<"Build ASTs and then debug dump them, forcing deserialization">;
+def templight_dump : Flag<["-"], "templight-dump">,
+  HelpText<"Dump templight information to stdout">;
 def ast_dump_lookups : Flag<["-"], "ast-dump-lookups">,
   HelpText<"Build ASTs and then debug dump their name lookup tables">;
 def ast_view : Flag<["-"], "ast-view">,
@@ -627,6 +645,8 @@ def disable_objc_default_synthesize_properties : Flag<["-"], "disable-objc-defau
   HelpText<"disable the default synthesis of Objective-C properties">;
 def fencode_extended_block_signature : Flag<["-"], "fencode-extended-block-signature">,
   HelpText<"enable extended encoding of block type signature">;
+def function_alignment : Separate<["-"], "function-alignment">,
+    HelpText<"default alignment for functions">;
 def pic_level : Separate<["-"], "pic-level">,
   HelpText<"Value for __PIC__">;
 def pic_is_pie : Flag<["-"], "pic-is-pie">,
@@ -687,8 +707,6 @@ def fobjc_subscripting_legacy_runtime : Flag<["-"], "fobjc-subscripting-legacy-r
   HelpText<"Allow Objective-C array and dictionary subscripting in legacy runtime">;
 def vtordisp_mode_EQ : Joined<["-"], "vtordisp-mode=">,
   HelpText<"Control vtordisp placement on win32 targets">;
-def fno_rtti_data : Flag<["-"], "fno-rtti-data">,
-  HelpText<"Control emission of RTTI data">;
 def fnative_half_type: Flag<["-"], "fnative-half-type">,
   HelpText<"Use the native half type for __fp16 instead of promoting to float">;
 def fnative_half_arguments_and_returns : Flag<["-"], "fnative-half-arguments-and-returns">,
@@ -696,11 +714,17 @@ def fnative_half_arguments_and_returns : Flag<["-"], "fnative-half-arguments-and
 def fallow_half_arguments_and_returns : Flag<["-"], "fallow-half-arguments-and-returns">,
   HelpText<"Allow function arguments and returns of type half">;
 def fdefault_calling_conv_EQ : Joined<["-"], "fdefault-calling-conv=">,
-  HelpText<"Set default MS calling convention">, Values<"cdecl,fastcall,stdcall,vectorcall">;
+  HelpText<"Set default calling convention">, Values<"cdecl,fastcall,stdcall,vectorcall,regcall">;
 def finclude_default_header : Flag<["-"], "finclude-default-header">,
   HelpText<"Include the default header file for OpenCL">;
 def fpreserve_vec3_type : Flag<["-"], "fpreserve-vec3-type">,
   HelpText<"Preserve 3-component vector type">;
+def fwchar_type_EQ : Joined<["-"], "fwchar-type=">,
+  HelpText<"Select underlying type for wchar_t">, Values<"char,short,int">;
+def fsigned_wchar : Flag<["-"], "fsigned-wchar">,
+  HelpText<"Use a signed type for wchar_t">;
+def fno_signed_wchar : Flag<["-"], "fno-signed-wchar">,
+  HelpText<"Use an unsigned type for wchar_t">;
 
 // FIXME: Remove these entirely once functionality/tests have been excised.
 def fobjc_gc_only : Flag<["-"], "fobjc-gc-only">, Group<f_Group>,

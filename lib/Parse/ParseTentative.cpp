@@ -873,7 +873,8 @@ Parser::TPResult Parser::TryParseOperatorId() {
 ///           template-id                                                 [TODO]
 ///
 Parser::TPResult Parser::TryParseDeclarator(bool mayBeAbstract,
-                                            bool mayHaveIdentifier) {
+                                            bool mayHaveIdentifier,
+                                            bool mayHaveDirectInit) {
   // declarator:
   //   direct-declarator
   //   ptr-operator declarator
@@ -929,6 +930,9 @@ Parser::TPResult Parser::TryParseDeclarator(bool mayBeAbstract,
   } else if (!mayBeAbstract) {
     return TPResult::False;
   }
+
+  if (mayHaveDirectInit)
+    return TPResult::Ambiguous;
 
   while (1) {
     TPResult TPR(TPResult::Ambiguous);
@@ -1026,6 +1030,7 @@ Parser::isExpressionOrTypeSpecifierSimple(tok::TokenKind Kind) {
   case tok::kw_char:
   case tok::kw_const:
   case tok::kw_double:
+  case tok::kw__Float16:
   case tok::kw___float128:
   case tok::kw_enum:
   case tok::kw_half:
@@ -1241,6 +1246,17 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
       case ANK_TentativeDecl:
         return TPResult::False;
       case ANK_TemplateName:
+        // In C++17, this could be a type template for class template argument
+        // deduction. Try to form a type annotation for it. If we're in a
+        // template template argument, we'll undo this when checking the
+        // validity of the argument.
+        if (getLangOpts().CPlusPlus17) {
+          if (TryAnnotateTypeOrScopeToken())
+            return TPResult::Error;
+          if (Tok.isNot(tok::identifier))
+            break;
+        }
+
         // A bare type template-name which can't be a template template
         // argument is an error, and was probably intended to be a type.
         return GreaterThanIsOperator ? TPResult::True : TPResult::False;
@@ -1298,11 +1314,9 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
     //   'friend'
     //   'typedef'
     //   'constexpr'
-    //   'concept'
   case tok::kw_friend:
   case tok::kw_typedef:
   case tok::kw_constexpr:
-  case tok::kw_concept:
     // storage-class-specifier
   case tok::kw_register:
   case tok::kw_static:
@@ -1337,6 +1351,7 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
   case tok::kw_struct:
   case tok::kw_union:
   case tok::kw___interface:
+  case tok::kw_concept:
     // enum-specifier
   case tok::kw_enum:
     // cv-qualifier
@@ -1421,8 +1436,6 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
             *HasMissingTypename = true;
             return TPResult::Ambiguous;
           }
-
-          // FIXME: Fails to either revert or commit the tentative parse!
         } else {
           // Try to resolve the name. If it doesn't exist, assume it was
           // intended to name a type and keep disambiguating.
@@ -1432,19 +1445,33 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
           case ANK_TentativeDecl:
             return TPResult::False;
           case ANK_TemplateName:
+            // In C++17, this could be a type template for class template
+            // argument deduction.
+            if (getLangOpts().CPlusPlus17) {
+              if (TryAnnotateTypeOrScopeToken())
+                return TPResult::Error;
+              if (Tok.isNot(tok::identifier))
+                break;
+            }
+
             // A bare type template-name which can't be a template template
             // argument is an error, and was probably intended to be a type.
-            return GreaterThanIsOperator ? TPResult::True : TPResult::False;
+            // In C++17, this could be class template argument deduction.
+            return (getLangOpts().CPlusPlus17 || GreaterThanIsOperator)
+                       ? TPResult::True
+                       : TPResult::False;
           case ANK_Unresolved:
             return HasMissingTypename ? TPResult::Ambiguous
                                       : TPResult::False;
           case ANK_Success:
-            // Annotated it, check again.
-            assert(Tok.isNot(tok::annot_cxxscope) ||
-                   NextToken().isNot(tok::identifier));
-            return isCXXDeclarationSpecifier(BracedCastResult,
-                                             HasMissingTypename);
+            break;
           }
+
+          // Annotated it, check again.
+          assert(Tok.isNot(tok::annot_cxxscope) ||
+                 NextToken().isNot(tok::identifier));
+          return isCXXDeclarationSpecifier(BracedCastResult,
+                                           HasMissingTypename);
         }
       }
       return TPResult::False;
@@ -1510,6 +1537,7 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
   case tok::kw_half:
   case tok::kw_float:
   case tok::kw_double:
+  case tok::kw__Float16:
   case tok::kw___float128:
   case tok::kw_void:
   case tok::annot_decltype:
@@ -1600,6 +1628,7 @@ bool Parser::isCXXDeclarationSpecifierAType() {
   case tok::kw_half:
   case tok::kw_float:
   case tok::kw_double:
+  case tok::kw__Float16:
   case tok::kw___float128:
   case tok::kw_void:
   case tok::kw___unknown_anytype:
@@ -1866,7 +1895,8 @@ Parser::TPResult Parser::TryParseFunctionDeclarator() {
     return TPResult::Error;
 
   // cv-qualifier-seq
-  while (Tok.isOneOf(tok::kw_const, tok::kw_volatile, tok::kw_restrict))
+  while (Tok.isOneOf(tok::kw_const, tok::kw_volatile, tok::kw___unaligned,
+                     tok::kw_restrict))
     ConsumeToken();
 
   // ref-qualifier[opt]

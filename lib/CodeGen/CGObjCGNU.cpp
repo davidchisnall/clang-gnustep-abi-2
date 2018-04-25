@@ -92,8 +92,7 @@ public:
     if (!Function) {
       if (!FunctionName)
         return nullptr;
-      Function =
-          cast<llvm::Constant>(CGM->CreateRuntimeFunction(FTy, FunctionName));
+      Function = CGM->CreateRuntimeFunction(FTy, FunctionName);
     }
     return Function;
   }
@@ -2070,16 +2069,8 @@ llvm::Value *CGObjCGNU::GetClass(CodeGenFunction &CGF,
                                  const ObjCInterfaceDecl *OID) {
   auto *Value =
       GetClassNamed(CGF, OID->getNameAsString(), OID->isWeakImported());
-  if (CGM.getTriple().isOSBinFormatCOFF()) {
-    if (auto *ClassSymbol = dyn_cast<llvm::GlobalVariable>(Value)) {
-      auto DLLStorage = llvm::GlobalValue::DefaultStorageClass;
-      if (OID->hasAttr<DLLExportAttr>())
-        DLLStorage = llvm::GlobalValue::DLLExportStorageClass;
-      else if (OID->hasAttr<DLLImportAttr>())
-        DLLStorage = llvm::GlobalValue::DLLImportStorageClass;
-      ClassSymbol->setDLLStorageClass(DLLStorage);
-    }
-  }
+  if (auto *ClassSymbol = dyn_cast<llvm::GlobalVariable>(Value))
+    CGM.setGVProperties(ClassSymbol, OID);
   return Value;
 }
 
@@ -2096,13 +2087,7 @@ llvm::Value *CGObjCGNU::EmitNSAutoreleasePoolClassRef(CodeGenFunction &CGF) {
         if ((VD = dyn_cast<VarDecl>(Result)))
           break;
 
-      auto DLLStorage = llvm::GlobalValue::DefaultStorageClass;
-      if (!VD || VD->hasAttr<DLLImportAttr>())
-        DLLStorage = llvm::GlobalValue::DLLImportStorageClass;
-      else if (VD->hasAttr<DLLExportAttr>())
-        DLLStorage = llvm::GlobalValue::DLLExportStorageClass;
-
-      ClassSymbol->setDLLStorageClass(DLLStorage);
+      CGM.setGVProperties(ClassSymbol, VD);
     }
   }
   return Value;
@@ -2504,7 +2489,7 @@ CGObjCGNU::GenerateMessageSend(CodeGenFunction &CGF,
   }
 
   // Reset the receiver in case the lookup modified it
-  ActualArgs[0] = CallArg(RValue::get(Receiver), ASTIdTy, false);
+  ActualArgs[0] = CallArg(RValue::get(Receiver), ASTIdTy);
 
   imp = EnforceType(Builder, imp, MSI.MessengerType);
 
@@ -2843,11 +2828,13 @@ CGObjCGNU::GenerateEmptyProtocol(StringRef ProtocolName) {
           llvm::ConstantInt::get(Int32Ty, ProtocolVersion), IdTy));
 
   Elements.add(MakeConstantString(ProtocolName, ".objc_protocol_name"));
-  Elements.add(ProtocolList);
-  Elements.add(MethodList);
-  Elements.add(MethodList);
-  Elements.add(MethodList);
-  Elements.add(MethodList);
+  Elements.add(ProtocolList); /* .protocol_list */
+  Elements.add(MethodList);   /* .instance_methods */
+  Elements.add(MethodList);   /* .class_methods */
+  Elements.add(MethodList);   /* .optional_instance_methods */
+  Elements.add(MethodList);   /* .optional_class_methods */
+  Elements.add(NULLPtr);      /* .properties */
+  Elements.add(NULLPtr);      /* .optional_properties */
   return Elements.finishAndCreateGlobal(SymbolForProtocol(ProtocolName),
                                         CGM.getPointerAlign());
 }
@@ -3355,14 +3342,8 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
       NULLPtr, NULLPtr, 0x12L, ClassName.c_str(), nullptr, Zeros[0],
       NULLPtr, ClassMethodList, NULLPtr, NULLPtr,
       GeneratePropertyList(OID, ClassDecl, true), ZeroPtr, ZeroPtr, true);
-  if (CGM.getTriple().isOSBinFormatCOFF()) {
-    auto Storage = llvm::GlobalValue::DefaultStorageClass;
-    if (OID->getClassInterface()->hasAttr<DLLImportAttr>())
-      Storage = llvm::GlobalValue::DLLImportStorageClass;
-    else if (OID->getClassInterface()->hasAttr<DLLExportAttr>())
-      Storage = llvm::GlobalValue::DLLExportStorageClass;
-    cast<llvm::GlobalValue>(MetaClassStruct)->setDLLStorageClass(Storage);
-  }
+  CGM.setGVProperties(cast<llvm::GlobalValue>(MetaClassStruct),
+                      OID->getClassInterface());
 
   // Generate the class structure
   llvm::Constant *ClassStruct = GenerateClassStructure(
@@ -3370,14 +3351,8 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
       llvm::ConstantInt::get(LongTy, instanceSize), IvarList, MethodList,
       GenerateProtocolList(Protocols), IvarOffsetArray, Properties,
       StrongIvarBitmap, WeakIvarBitmap);
-  if (CGM.getTriple().isOSBinFormatCOFF()) {
-    auto Storage = llvm::GlobalValue::DefaultStorageClass;
-    if (OID->getClassInterface()->hasAttr<DLLImportAttr>())
-      Storage = llvm::GlobalValue::DLLImportStorageClass;
-    else if (OID->getClassInterface()->hasAttr<DLLExportAttr>())
-      Storage = llvm::GlobalValue::DLLExportStorageClass;
-    cast<llvm::GlobalValue>(ClassStruct)->setDLLStorageClass(Storage);
-  }
+  CGM.setGVProperties(cast<llvm::GlobalValue>(ClassStruct),
+                      OID->getClassInterface());
 
   // Resolve the class aliases, if they exist.
   if (ClassPtrAlias) {

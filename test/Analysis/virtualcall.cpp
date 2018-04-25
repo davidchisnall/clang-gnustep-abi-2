@@ -262,6 +262,9 @@ int main() {
 	//expected-note-re@-2 {{{{^}}Calling default constructor for 'M'}}
 #endif
   Y *y = new Y;
+#if !PUREONLY
+  //expected-note-re@-2 {{{{^}}Calling default constructor for 'Y'}}
+#endif
   delete y;
   header::Z z;
 #if !PUREONLY
@@ -271,3 +274,24 @@ int main() {
 #if !PUREONLY
 	//expected-note-re@-2 2{{{{^}}Calling '~E'}}
 #endif
+
+namespace PR34451 {
+struct a {
+  void b() {
+    a c[1];
+    c->b();
+  }
+};
+
+class e {
+ public:
+  void b() const;
+};
+
+class c {
+  void m_fn2() const;
+  e d[];
+};
+
+void c::m_fn2() const { d->b(); }
+}

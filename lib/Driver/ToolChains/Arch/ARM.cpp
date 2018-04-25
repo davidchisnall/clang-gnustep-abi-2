@@ -131,6 +131,26 @@ bool arm::useAAPCSForMachO(const llvm::Triple &T) {
          T.getOS() == llvm::Triple::UnknownOS || isARMMProfile(T);
 }
 
+// Select mode for reading thread pointer (-mtp=soft/cp15).
+arm::ReadTPMode arm::getReadTPMode(const ToolChain &TC, const ArgList &Args) {
+  if (Arg *A = Args.getLastArg(options::OPT_mtp_mode_EQ)) {
+    const Driver &D = TC.getDriver();
+    arm::ReadTPMode ThreadPointer =
+        llvm::StringSwitch<arm::ReadTPMode>(A->getValue())
+            .Case("cp15", ReadTPMode::Cp15)
+            .Case("soft", ReadTPMode::Soft)
+            .Default(ReadTPMode::Invalid);
+    if (ThreadPointer != ReadTPMode::Invalid)
+      return ThreadPointer;
+    if (StringRef(A->getValue()).empty())
+      D.Diag(diag::err_drv_missing_arg_mtp) << A->getAsString(Args);
+    else
+      D.Diag(diag::err_drv_invalid_mtp) << A->getAsString(Args);
+    return ReadTPMode::Invalid;
+  }
+  return ReadTPMode::Soft;
+}
+
 // Select the float ABI as determined by -msoft-float, -mhard-float, and
 // -mfloat-abi=.
 arm::FloatABI arm::getARMFloatABI(const ToolChain &TC, const ArgList &Args) {
@@ -262,6 +282,7 @@ void arm::getARMTargetFeatures(const ToolChain &TC,
   bool KernelOrKext =
       Args.hasArg(options::OPT_mkernel, options::OPT_fapple_kext);
   arm::FloatABI ABI = arm::getARMFloatABI(TC, Args);
+  arm::ReadTPMode ThreadPointer = arm::getReadTPMode(TC, Args);
   const Arg *WaCPU = nullptr, *WaFPU = nullptr;
   const Arg *WaHDiv = nullptr, *WaArch = nullptr;
 
@@ -302,6 +323,9 @@ void arm::getARMTargetFeatures(const ToolChain &TC,
       }
     }
   }
+
+  if (ThreadPointer == arm::ReadTPMode::Cp15)
+    Features.push_back("+read-tp-hard");
 
   // Check -march. ClangAs gives preference to -Wa,-march=.
   const Arg *ArchArg = Args.getLastArg(options::OPT_march_EQ);
@@ -367,12 +391,22 @@ void arm::getARMTargetFeatures(const ToolChain &TC,
   } else if (HDivArg)
     getARMHWDivFeatures(D, HDivArg, Args, HDivArg->getValue(), Features);
 
-  // Setting -msoft-float effectively disables NEON because of the GCC
-  // implementation, although the same isn't true of VFP or VFP3.
+  // Setting -msoft-float/-mfloat-abi=soft effectively disables the FPU (GCC
+  // ignores the -mfpu options in this case).
+  // Note that the ABI can also be set implicitly by the target selected.
   if (ABI == arm::FloatABI::Soft) {
-    Features.push_back("-neon");
-    // Also need to explicitly disable features which imply NEON.
-    Features.push_back("-crypto");
+    llvm::ARM::getFPUFeatures(llvm::ARM::FK_NONE, Features);
+
+    // Disable hardware FP features which have been enabled.
+    // FIXME: Disabling vfp2 and neon should be enough as all the other
+    //        features are dependent on these 2 features in LLVM. However
+    //        there is currently no easy way to test this in clang, so for
+    //        now just be explicit and disable all known dependent features
+    //        as well.
+    for (std::string Feature : {"vfp2", "vfp3", "vfp4", "fp-armv8", "fullfp16",
+                                "neon", "crypto", "dotprod"})
+      if (std::find(std::begin(Features), std::end(Features), "+" + Feature) != std::end(Features))
+        Features.push_back(Args.MakeArgString("-" + Feature));
   }
 
   // En/disable crc code generation.

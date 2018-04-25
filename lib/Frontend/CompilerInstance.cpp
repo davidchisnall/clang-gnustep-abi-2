@@ -300,12 +300,14 @@ CompilerInstance::createDiagnostics(DiagnosticOptions *Opts,
 
 // File Manager
 
-void CompilerInstance::createFileManager() {
+FileManager *CompilerInstance::createFileManager() {
   if (!hasVirtualFileSystem()) {
-    // TODO: choose the virtual file system based on the CompilerInvocation.
-    setVirtualFileSystem(vfs::getRealFileSystem());
+    IntrusiveRefCntPtr<vfs::FileSystem> VFS =
+        createVFSFromCompilerInvocation(getInvocation(), getDiagnostics());
+    setVirtualFileSystem(VFS);
   }
   FileMgr = new FileManager(getFileSystemOpts(), VirtualFileSystem);
+  return FileMgr.get();
 }
 
 // Source Manager
@@ -382,6 +384,7 @@ void CompilerInstance::createPreprocessor(TranslationUnitKind TUKind) {
       Invocation->getPreprocessorOptsPtr(), getDiagnostics(), getLangOpts(),
       getSourceManager(), getPCMCache(), *HeaderInfo, *this, PTHMgr,
       /*OwnsHeaderSearch=*/true, TUKind);
+  getTarget().adjust(getLangOpts());
   PP->Initialize(getTarget(), getAuxTarget());
 
   // Note that this is different then passing PTHMgr to Preprocessor's ctor.
@@ -838,8 +841,8 @@ bool CompilerInstance::InitializeSourceManager(
           : Input.isSystem() ? SrcMgr::C_System : SrcMgr::C_User;
 
   if (Input.isBuffer()) {
-    SourceMgr.setMainFileID(SourceMgr.createFileID(
-        std::unique_ptr<llvm::MemoryBuffer>(Input.getBuffer()), Kind));
+    SourceMgr.setMainFileID(SourceMgr.createFileID(SourceManager::Unowned,
+                                                   Input.getBuffer(), Kind));
     assert(SourceMgr.getMainFileID().isValid() &&
            "Couldn't establish MainFileID!");
     return true;
@@ -1003,8 +1006,17 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
       OS << " and ";
     if (NumErrors)
       OS << NumErrors << " error" << (NumErrors == 1 ? "" : "s");
-    if (NumWarnings || NumErrors)
-      OS << " generated.\n";
+    if (NumWarnings || NumErrors) {
+      OS << " generated";
+      if (getLangOpts().CUDA) {
+        if (!getLangOpts().CUDAIsDevice) {
+          OS << " when compiling for host";
+        } else {
+          OS << " when compiling for " << getTargetOpts().CPU;
+        }
+      }
+      OS << ".\n";
+    }
   }
 
   if (getFrontendOpts().ShowStats) {
@@ -1075,6 +1087,10 @@ compileModuleImpl(CompilerInstance &ImportingInstance, SourceLocation ImportLoc,
                    llvm::CachedHashString(MacroDef.split('=').first)) > 0;
       }),
       PPOpts.Macros.end());
+
+  // If the original compiler invocation had -fmodule-name, pass it through.
+  Invocation->getLangOpts()->ModuleName =
+      ImportingInstance.getInvocation().getLangOpts()->ModuleName;
 
   // Note the name of the module we're building.
   Invocation->getLangOpts()->CurrentModule = ModuleName;
@@ -1284,7 +1300,7 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
         // case of timeout, build it ourselves.
         Diags.Report(ModuleNameLoc, diag::remark_module_lock_timeout)
             << Module->Name;
-        // Clear the lock file so that future invokations can make progress.
+        // Clear the lock file so that future invocations can make progress.
         Locked.unsafeRemoveLockFile();
         continue;
       }
@@ -1840,10 +1856,44 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
 
   // Verify that the rest of the module path actually corresponds to
   // a submodule.
+  bool MapPrivateSubModToTopLevel = false;
   if (!getLangOpts().ModulesTS && Path.size() > 1) {
     for (unsigned I = 1, N = Path.size(); I != N; ++I) {
       StringRef Name = Path[I].first->getName();
       clang::Module *Sub = Module->findSubmodule(Name);
+
+      // If the user is requesting Foo.Private and it doesn't exist, try to
+      // match Foo_Private and emit a warning asking for the user to write
+      // @import Foo_Private instead. FIXME: remove this when existing clients
+      // migrate off of Foo.Private syntax.
+      if (!Sub && PP->getLangOpts().ImplicitModules && Name == "Private" &&
+          Module == Module->getTopLevelModule()) {
+        SmallString<128> PrivateModule(Module->Name);
+        PrivateModule.append("_Private");
+
+        SmallVector<std::pair<IdentifierInfo *, SourceLocation>, 2> PrivPath;
+        auto &II = PP->getIdentifierTable().get(
+            PrivateModule, PP->getIdentifierInfo(Module->Name)->getTokenID());
+        PrivPath.push_back(std::make_pair(&II, Path[0].second));
+
+        if (PP->getHeaderSearchInfo().lookupModule(PrivateModule))
+          Sub =
+              loadModule(ImportLoc, PrivPath, Visibility, IsInclusionDirective);
+        if (Sub) {
+          MapPrivateSubModToTopLevel = true;
+          if (!getDiagnostics().isIgnored(
+                  diag::warn_no_priv_submodule_use_toplevel, ImportLoc)) {
+            getDiagnostics().Report(Path[I].second,
+                                    diag::warn_no_priv_submodule_use_toplevel)
+                << Path[I].first << Module->getFullModuleName() << PrivateModule
+                << SourceRange(Path[0].second, Path[I].second)
+                << FixItHint::CreateReplacement(SourceRange(Path[0].second),
+                                                PrivateModule);
+            getDiagnostics().Report(Sub->DefinitionLoc,
+                                    diag::note_private_top_level_defined);
+          }
+        }
+      }
       
       if (!Sub) {
         // Attempt to perform typo correction to find a module name that works.
@@ -1878,7 +1928,7 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
           Sub = Module->findSubmodule(Best[0]);
         }
       }
-      
+
       if (!Sub) {
         // No submodule by this name. Complain, and don't look for further
         // submodules.
@@ -1895,7 +1945,7 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
   // Make the named module visible, if it's not already part of the module
   // we are parsing.
   if (ModuleName != getLangOpts().CurrentModule) {
-    if (!Module->IsFromModuleFile) {
+    if (!Module->IsFromModuleFile && !MapPrivateSubModToTopLevel) {
       // We have an umbrella header or directory that doesn't actually include
       // all of the headers within the directory it covers. Complain about
       // this missing submodule and recover by forgetting that we ever saw
@@ -1928,6 +1978,12 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
     checkConfigMacro(getPreprocessor(), TopModule->ConfigMacros[I],
                      Module, ImportLoc);
   }
+
+  // Resolve any remaining module using export_as for this one.
+  getPreprocessor()
+      .getHeaderSearchInfo()
+      .getModuleMap()
+      .resolveLinkAsDependencies(TopModule);
 
   LastModuleImportLoc = ImportLoc;
   LastModuleImportResult = ModuleLoadResult(Module);

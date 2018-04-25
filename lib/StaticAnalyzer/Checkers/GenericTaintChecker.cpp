@@ -100,23 +100,6 @@ private:
   bool generateReportIfTainted(const Expr *E, const char Msg[],
                                CheckerContext &C) const;
 
-  /// The bug visitor prints a diagnostic message at the location where a given
-  /// variable was tainted.
-  class TaintBugVisitor
-      : public BugReporterVisitorImpl<TaintBugVisitor> {
-  private:
-    const SVal V;
-
-  public:
-    TaintBugVisitor(const SVal V) : V(V) {}
-    void Profile(llvm::FoldingSetNodeID &ID) const override { ID.Add(V); }
-
-    std::shared_ptr<PathDiagnosticPiece> VisitNode(const ExplodedNode *N,
-                                                   const ExplodedNode *PrevN,
-                                                   BugReporterContext &BRC,
-                                                   BugReport &BR) override;
-  };
-
   typedef SmallVector<unsigned, 2> ArgVector;
 
   /// \brief A struct used to specify taint propagation rules for a function.
@@ -213,28 +196,6 @@ const char GenericTaintChecker::MsgTaintedBufferSize[] =
 /// ReturnValueIndex, or indexes of the pointer/reference argument, which
 /// points to data, which should be tainted on return.
 REGISTER_SET_WITH_PROGRAMSTATE(TaintArgsOnPostVisit, unsigned)
-
-std::shared_ptr<PathDiagnosticPiece>
-GenericTaintChecker::TaintBugVisitor::VisitNode(const ExplodedNode *N,
-    const ExplodedNode *PrevN, BugReporterContext &BRC, BugReport &BR) {
-
-  // Find the ExplodedNode where the taint was first introduced
-  if (!N->getState()->isTainted(V) || PrevN->getState()->isTainted(V))
-    return nullptr;
-
-  const Stmt *S = PathDiagnosticLocation::getStmt(N);
-  if (!S)
-    return nullptr;
-
-  const LocationContext *NCtx = N->getLocationContext();
-  PathDiagnosticLocation L =
-      PathDiagnosticLocation::createBegin(S, BRC.getSourceManager(), NCtx);
-  if (!L.isValid() || !L.asLocation().isValid())
-    return nullptr;
-
-  return std::make_shared<PathDiagnosticEventPiece>(
-      L, "Taint originated here");
-}
 
 GenericTaintChecker::TaintPropagationRule
 GenericTaintChecker::TaintPropagationRule::getTaintPropagationRule(
@@ -466,9 +427,9 @@ bool GenericTaintChecker::checkPre(const CallExpr *CE, CheckerContext &C) const{
 }
 
 Optional<SVal> GenericTaintChecker::getPointedToSVal(CheckerContext &C,
-                                            const Expr* Arg) {
+                                                     const Expr *Arg) {
   ProgramStateRef State = C.getState();
-  SVal AddrVal = State->getSVal(Arg->IgnoreParens(), C.getLocationContext());
+  SVal AddrVal = C.getSVal(Arg->IgnoreParens());
   if (AddrVal.isUnknownOrUndef())
     return None;
 
@@ -476,9 +437,18 @@ Optional<SVal> GenericTaintChecker::getPointedToSVal(CheckerContext &C,
   if (!AddrLoc)
     return None;
 
-  const PointerType *ArgTy =
-    dyn_cast<PointerType>(Arg->getType().getCanonicalType().getTypePtr());
-  return State->getSVal(*AddrLoc, ArgTy ? ArgTy->getPointeeType(): QualType());
+  QualType ArgTy = Arg->getType().getCanonicalType();
+  if (!ArgTy->isPointerType())
+    return None;
+
+  QualType ValTy = ArgTy->getPointeeType();
+
+  // Do not dereference void pointers. Treat them as byte pointers instead.
+  // FIXME: we might want to consider more than just the first byte.
+  if (ValTy->isVoidType())
+    ValTy = C.getASTContext().CharTy;
+
+  return State->getSVal(*AddrLoc, ValTy);
 }
 
 ProgramStateRef
@@ -612,7 +582,7 @@ ProgramStateRef GenericTaintChecker::postRetTaint(const CallExpr *CE,
 
 bool GenericTaintChecker::isStdin(const Expr *E, CheckerContext &C) {
   ProgramStateRef State = C.getState();
-  SVal Val = State->getSVal(E, C.getLocationContext());
+  SVal Val = C.getSVal(E);
 
   // stdin is a pointer, so it would be a region.
   const MemRegion *MemReg = Val.getAsRegion();
@@ -637,7 +607,8 @@ bool GenericTaintChecker::isStdin(const Expr *E, CheckerContext &C) {
     if ((D->getName().find("stdin") != StringRef::npos) && D->isExternC())
         if (const PointerType * PtrTy =
               dyn_cast<PointerType>(D->getType().getTypePtr()))
-          if (PtrTy->getPointeeType() == C.getASTContext().getFILEType())
+          if (PtrTy->getPointeeType().getCanonicalType() ==
+              C.getASTContext().getFILEType().getCanonicalType())
             return true;
   }
   return false;

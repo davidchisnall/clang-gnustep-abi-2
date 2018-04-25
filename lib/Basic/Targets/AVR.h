@@ -52,12 +52,10 @@ public:
     PtrDiffType = SignedInt;
     IntPtrType = SignedInt;
     Char16Type = UnsignedInt;
-    WCharType = SignedInt;
     WIntType = SignedInt;
     Char32Type = UnsignedLong;
     SigAtomicType = SignedChar;
-    resetDataLayout("e-p:16:16:16-i8:8:8-i16:16:16-i32:32:32-i64:64:64"
-                    "-f32:32:32-f64:64:64-n8");
+    resetDataLayout("e-P1-p:16:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8-a:8");
   }
 
   void getTargetDefines(const LangOptions &Opts,
@@ -169,6 +167,7 @@ public:
   }
 
   bool isValidCPUName(StringRef Name) const override;
+  void fillValidCPUList(SmallVectorImpl<StringRef> &Values) const override;
   bool setCPU(const std::string &Name) override {
     bool isValid = isValidCPUName(Name);
     if (isValid)

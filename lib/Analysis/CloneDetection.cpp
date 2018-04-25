@@ -205,7 +205,7 @@ public:
     ConstStmtVisitor<CloneTypeIIStmtDataCollector<T>>::Visit##CLASS(S);        \
   }
 
-#include "../AST/StmtDataCollectors.inc"
+#include "clang/AST/StmtDataCollectors.inc"
 
 // Type II clones ignore variable names and literals, so let's skip them.
 #define SKIP(CLASS)                                                            \
@@ -381,7 +381,7 @@ void RecursiveCloneTypeIIHashConstraint::constrain(
     for (unsigned i = 0; i < StmtsByHash.size() - 1; ++i) {
       const auto Current = StmtsByHash[i];
 
-      // It's likely that we just found an sequence of StmtSequences that
+      // It's likely that we just found a sequence of StmtSequences that
       // represent a CloneGroup, so we create a new group and start checking and
       // adding the StmtSequences in this sequence.
       CloneDetector::CloneGroup NewGroup;
@@ -422,7 +422,8 @@ void RecursiveCloneTypeIIVerifyConstraint::constrain(
 }
 
 size_t MinComplexityConstraint::calculateStmtComplexity(
-    const StmtSequence &Seq, const std::string &ParentMacroStack) {
+    const StmtSequence &Seq, std::size_t Limit,
+    const std::string &ParentMacroStack) {
   if (Seq.empty())
     return 0;
 
@@ -431,10 +432,8 @@ size_t MinComplexityConstraint::calculateStmtComplexity(
   ASTContext &Context = Seq.getASTContext();
 
   // Look up what macros expanded into the current statement.
-  std::string StartMacroStack =
+  std::string MacroStack =
       data_collection::getMacroStack(Seq.getStartLoc(), Context);
-  std::string EndMacroStack =
-      data_collection::getMacroStack(Seq.getEndLoc(), Context);
 
   // First, check if ParentMacroStack is not empty which means we are currently
   // dealing with a parent statement which was expanded from a macro.
@@ -444,8 +443,7 @@ size_t MinComplexityConstraint::calculateStmtComplexity(
   // macro expansion will only increase the total complexity by one.
   // Note: This is not the final complexity of this statement as we still
   // add the complexity of the child statements to the complexity value.
-  if (!ParentMacroStack.empty() && (StartMacroStack == ParentMacroStack &&
-                                    EndMacroStack == ParentMacroStack)) {
+  if (!ParentMacroStack.empty() && MacroStack == ParentMacroStack) {
     Complexity = 0;
   }
 
@@ -454,12 +452,16 @@ size_t MinComplexityConstraint::calculateStmtComplexity(
   if (Seq.holdsSequence()) {
     for (const Stmt *S : Seq) {
       Complexity += calculateStmtComplexity(
-          StmtSequence(S, Seq.getContainingDecl()), StartMacroStack);
+          StmtSequence(S, Seq.getContainingDecl()), Limit, MacroStack);
+      if (Complexity >= Limit)
+        return Limit;
     }
   } else {
     for (const Stmt *S : Seq.front()->children()) {
       Complexity += calculateStmtComplexity(
-          StmtSequence(S, Seq.getContainingDecl()), StartMacroStack);
+          StmtSequence(S, Seq.getContainingDecl()), Limit, MacroStack);
+      if (Complexity >= Limit)
+        return Limit;
     }
   }
   return Complexity;
@@ -477,7 +479,8 @@ void MatchingVariablePatternConstraint::constrain(
 
 void CloneConstraint::splitCloneGroups(
     std::vector<CloneDetector::CloneGroup> &CloneGroups,
-    std::function<bool(const StmtSequence &, const StmtSequence &)> Compare) {
+    llvm::function_ref<bool(const StmtSequence &, const StmtSequence &)>
+        Compare) {
   std::vector<CloneDetector::CloneGroup> Result;
   for (auto &HashGroup : CloneGroups) {
     // Contains all indexes in HashGroup that were already added to a
@@ -531,14 +534,14 @@ void VariablePattern::addVariableOccurence(const VarDecl *VarDecl,
   // First check if we already reference this variable
   for (size_t KindIndex = 0; KindIndex < Variables.size(); ++KindIndex) {
     if (Variables[KindIndex] == VarDecl) {
-      // If yes, add a new occurence that points to the existing entry in
+      // If yes, add a new occurrence that points to the existing entry in
       // the Variables vector.
       Occurences.emplace_back(KindIndex, Mention);
       return;
     }
   }
   // If this variable wasn't already referenced, add it to the list of
-  // referenced variables and add a occurence that points to this new entry.
+  // referenced variables and add a occurrence that points to this new entry.
   Occurences.emplace_back(Variables.size(), Mention);
   Variables.push_back(VarDecl);
 }

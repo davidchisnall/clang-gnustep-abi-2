@@ -36,10 +36,13 @@ enum LanguageID {
   CXX_LANG = 0x4,     // builtin for cplusplus only.
   OBJC_LANG = 0x8,    // builtin for objective-c and objective-c++
   MS_LANG = 0x10,     // builtin requires MS mode.
-  OCLC20_LANG = 0x20, // builtin for OpenCL C only.
+  OCLC20_LANG = 0x20, // builtin for OpenCL C 2.0 only.
+  OCLC1X_LANG = 0x40, // builtin for OpenCL C 1.x only.
+  OMP_LANG = 0x80,    // builtin requires OpenMP.
   ALL_LANGUAGES = C_LANG | CXX_LANG | OBJC_LANG, // builtin for all languages.
   ALL_GNU_LANGUAGES = ALL_LANGUAGES | GNU_LANG,  // builtin requires GNU mode.
-  ALL_MS_LANGUAGES = ALL_LANGUAGES | MS_LANG     // builtin requires MS mode.
+  ALL_MS_LANGUAGES = ALL_LANGUAGES | MS_LANG,    // builtin requires MS mode.
+  ALL_OCLC_LANGUAGES = OCLC1X_LANG | OCLC20_LANG // builtin for OCLC languages.
 };
 
 namespace Builtin {
@@ -164,6 +167,13 @@ public:
     return strchr(getRecord(ID).Type, '*') != nullptr;
   }
 
+  /// \brief Return true if this builtin has a result or any arguments which are
+  /// reference types.
+  bool hasReferenceArgsOrResult(unsigned ID) const {
+    return strchr(getRecord(ID).Type, '&') != nullptr ||
+           strchr(getRecord(ID).Type, 'A') != nullptr;
+  }
+
   /// \brief Completely forget that the given ID was ever considered a builtin,
   /// e.g., because the user provided a conflicting signature.
   void forgetBuiltin(unsigned ID, IdentifierTable &Table);
@@ -208,6 +218,10 @@ public:
   /// Returns true if this is a libc/libm function without the '__builtin_'
   /// prefix.
   static bool isBuiltinFunc(const char *Name);
+
+  /// Returns true if this is a builtin that can be redeclared.  Returns true
+  /// for non-builtins.
+  bool canBeRedeclared(unsigned ID) const;
 
 private:
   const Info &getRecord(unsigned ID) const;

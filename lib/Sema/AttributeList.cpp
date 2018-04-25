@@ -1,4 +1,4 @@
-//===--- AttributeList.cpp --------------------------------------*- C++ -*-===//
+//===- AttributeList.cpp --------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,14 +13,17 @@
 
 #include "clang/Sema/AttributeList.h"
 #include "clang/AST/ASTContext.h"
-#include "clang/AST/DeclCXX.h"
-#include "clang/AST/DeclTemplate.h"
-#include "clang/AST/Expr.h"
 #include "clang/Basic/AttrSubjectMatchRules.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/SemaInternal.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include <cassert>
+#include <cstddef>
+#include <utility>
+
 using namespace clang;
 
 IdentifierLoc *IdentifierLoc::create(ASTContext &Ctx, SourceLocation Loc,
@@ -44,7 +47,7 @@ AttributeFactory::AttributeFactory() {
   // Go ahead and configure all the inline capacity.  This is just a memset.
   FreeLists.resize(InlineFreeListsCapacity);
 }
-AttributeFactory::~AttributeFactory() {}
+AttributeFactory::~AttributeFactory() = default;
 
 static size_t getFreeListIndexForSize(size_t size) {
   assert(size >= sizeof(AttributeList));
@@ -114,7 +117,8 @@ static StringRef normalizeAttrName(StringRef AttrName, StringRef ScopeName,
   // Normalize the attribute name, __foo__ becomes foo. This is only allowable
   // for GNU attributes.
   bool IsGNU = SyntaxUsed == AttributeList::AS_GNU ||
-               (SyntaxUsed == AttributeList::AS_CXX11 && ScopeName == "gnu");
+               ((SyntaxUsed == AttributeList::AS_CXX11 ||
+                SyntaxUsed == AttributeList::AS_C2x) && ScopeName == "gnu");
   if (IsGNU && AttrName.size() >= 4 && AttrName.startswith("__") &&
       AttrName.endswith("__"))
     AttrName = AttrName.slice(2, AttrName.size() - 2);
@@ -135,7 +139,7 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name,
 
   // Ensure that in the case of C++11 attributes, we look for '::foo' if it is
   // unscoped.
-  if (ScopeName || SyntaxUsed == AS_CXX11)
+  if (ScopeName || SyntaxUsed == AS_CXX11 || SyntaxUsed == AS_C2x)
     FullName += "::";
   FullName += AttrName;
 
@@ -174,8 +178,10 @@ struct ParsedAttrInfo {
 };
 
 namespace {
-  #include "clang/Sema/AttrParsedAttrImpl.inc"
-}
+
+#include "clang/Sema/AttrParsedAttrImpl.inc"
+
+} // namespace
 
 static const ParsedAttrInfo &getInfo(const AttributeList &A) {
   return AttrInfoMap[A.getKind()];

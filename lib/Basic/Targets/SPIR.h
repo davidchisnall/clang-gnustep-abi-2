@@ -27,6 +27,7 @@ static const unsigned SPIRAddrSpaceMap[] = {
     1, // opencl_global
     3, // opencl_local
     2, // opencl_constant
+    0, // opencl_private
     4, // opencl_generic
     0, // cuda_device
     0, // cuda_constant
@@ -42,6 +43,7 @@ public:
     assert(getTriple().getEnvironment() == llvm::Triple::UnknownEnvironment &&
            "SPIR target must use unknown environment type");
     TLSSupported = false;
+    VLASupported = false;
     LongWidth = LongAlign = 64;
     AddrSpaceMap = &SPIRAddrSpaceMap;
     UseAddrSpaceMapMangling = true;

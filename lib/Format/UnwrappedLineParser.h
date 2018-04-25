@@ -53,9 +53,15 @@ struct UnwrappedLine {
   /// \c MatchingOpeningBlockLineIndex stores the index of the corresponding
   /// opening line. Otherwise, \c MatchingOpeningBlockLineIndex must be
   /// \c kInvalidIndex.
-  size_t MatchingOpeningBlockLineIndex;
+  size_t MatchingOpeningBlockLineIndex = kInvalidIndex;
+
+  /// \brief If this \c UnwrappedLine opens a block, stores the index of the
+  /// line with the corresponding closing brace.
+  size_t MatchingClosingBlockLineIndex = kInvalidIndex;
 
   static const size_t kInvalidIndex = -1;
+
+  unsigned FirstStartColumn = 0;
 };
 
 class UnwrappedLineConsumer {
@@ -71,6 +77,7 @@ class UnwrappedLineParser {
 public:
   UnwrappedLineParser(const FormatStyle &Style,
                       const AdditionalKeywords &Keywords,
+                      unsigned FirstStartColumn,
                       ArrayRef<FormatToken *> Tokens,
                       UnwrappedLineConsumer &Callback);
 
@@ -96,7 +103,7 @@ private:
   bool parseBracedList(bool ContinueOnSemicolons = false,
                        tok::TokenKind ClosingBraceKind = tok::r_brace);
   void parseParens();
-  void parseSquare();
+  void parseSquare(bool LambdaIntroducer = false);
   void parseIfThenElse();
   void parseTryCatch();
   void parseForOrWhileLoop();
@@ -116,7 +123,7 @@ private:
   void parseObjCProtocolList();
   void parseObjCUntilAtEnd();
   void parseObjCInterfaceOrImplementation();
-  void parseObjCProtocol();
+  bool parseObjCProtocol();
   void parseJavaScriptEs6ImportExport();
   bool tryToParseLambda();
   bool tryToParseLambdaIntroducer();
@@ -129,7 +136,6 @@ private:
   // - if the token is '}' and closes a block, LevelDifference is -1.
   void nextToken(int LevelDifference = 0);
   void readToken(int LevelDifference = 0);
-  const FormatToken *getPreviousToken();
 
   // Decides which comment tokens should be added to the current line and which
   // should be added as comments before the next token.
@@ -139,7 +145,7 @@ private:
   // token.
   //
   // NextTok specifies the next token. A null pointer NextTok is supported, and
-  // signifies either the absense of a next token, or that the next token
+  // signifies either the absence of a next token, or that the next token
   // shouldn't be taken into accunt for the analysis.
   void distributeComments(const SmallVectorImpl<FormatToken *> &Comments,
                           const FormatToken *NextTok);
@@ -246,10 +252,27 @@ private:
   // sequence.
   std::stack<int> PPChainBranchIndex;
 
-  // Contains the #ifndef condition for a potential include guard.
-  FormatToken *IfNdefCondition;
-  bool FoundIncludeGuardStart;
-  bool IncludeGuardRejected;
+  // Include guard search state. Used to fixup preprocessor indent levels
+  // so that include guards do not participate in indentation.
+  enum IncludeGuardState {
+    IG_Inited,   // Search started, looking for #ifndef.
+    IG_IfNdefed, // #ifndef found, IncludeGuardToken points to condition.
+    IG_Defined,  // Matching #define found, checking other requirements.
+    IG_Found,    // All requirements met, need to fix indents.
+    IG_Rejected, // Search failed or never started.
+  };
+
+  // Current state of include guard search.
+  IncludeGuardState IncludeGuard;
+
+  // Points to the #ifndef condition for a potential include guard. Null unless
+  // IncludeGuardState == IG_IfNdefed.
+  FormatToken *IncludeGuardToken;
+
+  // Contains the first start column where the source begins. This is zero for
+  // normal source code and may be nonzero when formatting a code fragment that
+  // does not start at the beginning of the file.
+  unsigned FirstStartColumn;
 
   friend class ScopedLineState;
   friend class CompoundStatementIndenter;
@@ -263,8 +286,9 @@ struct UnwrappedLineNode {
   SmallVector<UnwrappedLine, 0> Children;
 };
 
-inline UnwrappedLine::UnwrappedLine() : Level(0), InPPDirective(false),
-  MustBeDeclaration(false), MatchingOpeningBlockLineIndex(kInvalidIndex) {}
+inline UnwrappedLine::UnwrappedLine()
+    : Level(0), InPPDirective(false), MustBeDeclaration(false),
+      MatchingOpeningBlockLineIndex(kInvalidIndex) {}
 
 } // end namespace format
 } // end namespace clang

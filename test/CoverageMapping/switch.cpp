@@ -6,7 +6,7 @@ void foo(int i) {   // CHECK-NEXT: File 0, [[@LINE]]:17 -> [[@LINE+8]]:2 = #0
   case 1:           // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+1]]:11 = #2
     return;
   case 2:           // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+1]]:10 = #3
-    break;
+    break;          // CHECK-NEXT: File 0, [[@LINE]]:10 -> [[@LINE+2]]:3 = #1
   }
   int x = 0;        // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+1]]:2 = #1
 }
@@ -38,7 +38,7 @@ void bar(int i) {   // CHECK-NEXT: File 0, [[@LINE]]:17 -> [[@LINE+20]]:2 = #0
 
                     // CHECK: baz
 void baz() {        // CHECK-NEXT: File 0, [[@LINE]]:12 -> [[@LINE+5]]:2 = #0
-  switch (int i = true ? nop()  // CHECK-NEXT: [[@LINE]]:26 -> [[@LINE]]:31 = #2
+  switch (int i = true ? nop()  // CHECK: [[@LINE]]:26 -> [[@LINE]]:31 = #2
                        : nop(); // CHECK-NEXT: [[@LINE]]:26 -> [[@LINE]]:31 = (#0 - #2)
           i) {}
   nop();            // CHECK-NEXT: [[@LINE]]:3 -> [[@LINE+1]]:2 = #1
@@ -55,7 +55,7 @@ int main() {        // CHECK-NEXT: File 0, [[@LINE]]:12 -> [[@LINE+35]]:2 = #0
     i = 2;
     break;
   default:          // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+1]]:10 = #4
-    break;
+    break;          // CHECK-NEXT: File 0, [[@LINE]]:10 -> [[@LINE+2]]:3 = #1
   }
   switch(i) {       // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+23]]:2 = #1
   case 0:           // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+2]]:10 = #6
@@ -64,7 +64,7 @@ int main() {        // CHECK-NEXT: File 0, [[@LINE]]:12 -> [[@LINE+35]]:2 = #0
   case 1:           // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+3]]:10 = #7
     i = 2;
   default:          // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+1]]:10 = (#7 + #8)
-    break;
+    break;          // CHECK-NEXT: File 0, [[@LINE]]:10 -> [[@LINE+3]]:3 = #5
   }
 
   switch(i) {       // CHECK-NEXT: File 0, [[@LINE]]:3 -> [[@LINE+13]]:2 = #5

@@ -30,7 +30,7 @@ using namespace clang;
 
 void UnqualifiedId::setTemplateId(TemplateIdAnnotation *TemplateId) {
   assert(TemplateId && "NULL template-id annotation?");
-  Kind = IK_TemplateId;
+  Kind = UnqualifiedIdKind::IK_TemplateId;
   this->TemplateId = TemplateId;
   StartLocation = TemplateId->TemplateNameLoc;
   EndLocation = TemplateId->RAngleLoc;
@@ -38,7 +38,7 @@ void UnqualifiedId::setTemplateId(TemplateIdAnnotation *TemplateId) {
 
 void UnqualifiedId::setConstructorTemplateId(TemplateIdAnnotation *TemplateId) {
   assert(TemplateId && "NULL template-id annotation?");
-  Kind = IK_ConstructorTemplateId;
+  Kind = UnqualifiedIdKind::IK_ConstructorTemplateId;
   this->TemplateId = TemplateId;
   StartLocation = TemplateId->TemplateNameLoc;
   EndLocation = TemplateId->RAngleLoc;
@@ -336,6 +336,7 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_decimal32:
     case TST_decimal64:
     case TST_double:
+    case TST_Float16:
     case TST_float128:
     case TST_enum:
     case TST_error:
@@ -386,16 +387,16 @@ bool Declarator::isDeclarationOfFunction() const {
 }
 
 bool Declarator::isStaticMember() {
-  assert(getContext() == MemberContext);
+  assert(getContext() == DeclaratorContext::MemberContext);
   return getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static ||
-         (getName().Kind == UnqualifiedId::IK_OperatorFunctionId &&
+         (getName().Kind == UnqualifiedIdKind::IK_OperatorFunctionId &&
           CXXMethodDecl::isStaticOverloadedOperator(
               getName().OperatorFunctionId.Operator));
 }
 
 bool Declarator::isCtorOrDtor() {
-  return (getName().getKind() == UnqualifiedId::IK_ConstructorName) ||
-         (getName().getKind() == UnqualifiedId::IK_DestructorName);
+  return (getName().getKind() == UnqualifiedIdKind::IK_ConstructorName) ||
+         (getName().getKind() == UnqualifiedIdKind::IK_DestructorName);
 }
 
 bool DeclSpec::hasTagDefinition() const {
@@ -424,6 +425,7 @@ unsigned DeclSpec::getParsedSpecifiers() const {
     Res |= PQ_FunctionSpecifier;
   return Res;
 }
+
 
 template <class T> static bool BadSpecifier(T TNew, T TPrev,
                                             const char *&PrevSpec,
@@ -490,7 +492,6 @@ const char *DeclSpec::getSpecifierName(TSS S) {
   }
   llvm_unreachable("Unknown typespec!");
 }
-
 const char *DeclSpec::getSpecifierName(DeclSpec::TST T,
                                        const PrintingPolicy &Policy) {
   switch (T) {
@@ -505,6 +506,7 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T,
   case DeclSpec::TST_half:        return "half";
   case DeclSpec::TST_float:       return "float";
   case DeclSpec::TST_double:      return "double";
+  case DeclSpec::TST_float16:     return "_Float16";
   case DeclSpec::TST_float128:    return "__float128";
   case DeclSpec::TST_bool:        return Policy.Bool ? "bool" : "_Bool";
   case DeclSpec::TST_decimal32:   return "_Decimal32";
@@ -967,16 +969,67 @@ bool DeclSpec::SetConstexprSpec(SourceLocation Loc, const char *&PrevSpec,
   return false;
 }
 
-bool DeclSpec::SetConceptSpec(SourceLocation Loc, const char *&PrevSpec,
-                              unsigned &DiagID) {
-  if (Concept_specified) {
-    DiagID = diag::ext_duplicate_declspec;
-    PrevSpec = "concept";
-    return true;
+bool DeclSpec::setConceptSpec(const SourceLocation Loc, const char *&PrevSpec,
+                              unsigned &DiagID, const PrintingPolicy &PP) {
+  assert(Loc.isValid() && "Loc must be valid, since it is used to identify "
+                          "that this function was called before");
+  assert(!ConceptLoc.isValid() &&
+         "how is this called if concept was already encountered and triggered "
+         "ParseConceptDefinition which parses upto the semi-colon");
+
+  PrevSpec = nullptr;
+  if (TypeSpecType != TST_unspecified) {
+    PrevSpec = DeclSpec::getSpecifierName(static_cast<TST>(TypeSpecType), PP);
+	  ClearTypeSpecType();
   }
-  Concept_specified = true;
+  if (TypeSpecSign != TSS_unspecified) {
+    PrevSpec = DeclSpec::getSpecifierName(static_cast<TSS>(TypeSpecSign));
+	  TypeSpecSign = TSS_unspecified;
+  }
+  if (TypeSpecWidth != TSW_unspecified) {
+    PrevSpec = DeclSpec::getSpecifierName(static_cast<TSW>(TypeSpecWidth));
+	  TypeSpecWidth = TSW_unspecified;
+  }
+  if (StorageClassSpec != SCS_unspecified) {
+    PrevSpec = DeclSpec::getSpecifierName(static_cast<SCS>(StorageClassSpec));
+	  ClearStorageClassSpecs();
+  }
+  if (ThreadStorageClassSpec != TSCS_unspecified) {
+    PrevSpec =
+        DeclSpec::getSpecifierName(static_cast<TSCS>(ThreadStorageClassSpec));
+    ClearStorageClassSpecs();
+  }
+  if (TypeSpecComplex != TSC_unspecified) {
+    PrevSpec = DeclSpec::getSpecifierName(static_cast<TSC>(TypeSpecComplex));
+    TypeSpecComplex = TSC_unspecified;
+  }
+  if (getTypeQualifiers()) {
+	  PrevSpec = DeclSpec::getSpecifierName(static_cast<TQ>(TypeQualifiers));
+    ClearTypeQualifiers();
+  }
+  if (isFriendSpecified()) {
+    PrevSpec = "friend";
+    Friend_specified = false;
+    FriendLoc = SourceLocation();
+  }
+  if (isConstexprSpecified()) {
+    PrevSpec = "constexpr";
+    Constexpr_specified = false;
+    ConstexprLoc = SourceLocation();
+  }
+  if (isInlineSpecified()) {
+    PrevSpec = "inline";
+    FS_inlineLoc = SourceLocation();
+    FS_inline_specified = false;
+  }
+
+  if (PrevSpec) {
+    DiagID = diag::err_invalid_decl_spec_combination;
+  }
+  // We set the concept location regardless of whether an error occurred.
+  DeclRep = nullptr;
   ConceptLoc = Loc;
-  return false;
+  return PrevSpec; // If this is non-null, an error occurred.
 }
 
 void DeclSpec::SaveWrittenBuiltinSpecs() {
@@ -1280,6 +1333,7 @@ void DeclSpec::Finish(Sema &S, const PrintingPolicy &Policy) {
   // TODO: return "auto function" and other bad things based on the real type.
 
   // 'data definition has no type or storage class'?
+
 }
 
 bool DeclSpec::isMissingDeclaratorOk() {
@@ -1291,7 +1345,7 @@ bool DeclSpec::isMissingDeclaratorOk() {
 void UnqualifiedId::setOperatorFunctionId(SourceLocation OperatorLoc, 
                                           OverloadedOperatorKind Op,
                                           SourceLocation SymbolLocations[3]) {
-  Kind = IK_OperatorFunctionId;
+  Kind = UnqualifiedIdKind::IK_OperatorFunctionId;
   StartLocation = OperatorLoc;
   EndLocation = OperatorLoc;
   OperatorFunctionId.Operator = Op;

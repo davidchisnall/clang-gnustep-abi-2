@@ -412,7 +412,7 @@ class ObjectFileHandler final : public FileHandler {
   /// read from the buffers.
   unsigned NumberOfProcessedInputs = 0;
 
-  /// LLVM context used to to create the auxiliary modules.
+  /// LLVM context used to create the auxiliary modules.
   LLVMContext VMContext;
 
   /// LLVM module used to create an object with all the bundle
@@ -563,7 +563,7 @@ public:
           errs() << "error: unable to open temporary file.\n";
           return true;
         }
-        WriteBitcodeToFile(AuxModule.get(), BitcodeFile);
+        WriteBitcodeToFile(*AuxModule, BitcodeFile);
       }
 
       bool Failed = sys::ExecuteAndWait(ClangBinary.get(), ClangArgs);
@@ -931,8 +931,10 @@ int main(int argc, const char **argv) {
       "one. The resulting file can also be unbundled into different files by \n"
       "this tool if -unbundle is provided.\n");
 
-  if (Help)
+  if (Help) {
     cl::PrintHelpMessage();
+    return 0;
+  }
 
   bool Error = false;
   if (Unbundle) {

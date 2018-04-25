@@ -1,4 +1,4 @@
-//===--- OpenMPClause.cpp - Classes for OpenMP clauses --------------------===//
+//===- OpenMPClause.cpp - Classes for OpenMP clauses ----------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,8 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/OpenMPClause.h"
-
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Decl.h"
+#include "clang/Basic/LLVM.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
+#include <algorithm>
+#include <cassert>
 
 using namespace clang;
 
@@ -60,6 +66,8 @@ const OMPClauseWithPreInit *OMPClauseWithPreInit::get(const OMPClause *C) {
     return static_cast<const OMPNumTeamsClause *>(C);
   case OMPC_thread_limit:
     return static_cast<const OMPThreadLimitClause *>(C);
+  case OMPC_device:
+    return static_cast<const OMPDeviceClause *>(C);
   case OMPC_default:
   case OMPC_proc_bind:
   case OMPC_final:
@@ -83,7 +91,6 @@ const OMPClauseWithPreInit *OMPClauseWithPreInit::get(const OMPClause *C) {
   case OMPC_capture:
   case OMPC_seq_cst:
   case OMPC_depend:
-  case OMPC_device:
   case OMPC_threads:
   case OMPC_simd:
   case OMPC_map:
@@ -695,10 +702,10 @@ unsigned OMPClauseMappableExprCommon::getComponentsTotalNumber(
 }
 
 unsigned OMPClauseMappableExprCommon::getUniqueDeclarationsTotalNumber(
-    ArrayRef<ValueDecl *> Declarations) {
+    ArrayRef<const ValueDecl *> Declarations) {
   unsigned TotalNum = 0u;
   llvm::SmallPtrSet<const ValueDecl *, 8> Cache;
-  for (auto *D : Declarations) {
+  for (const ValueDecl *D : Declarations) {
     const ValueDecl *VD = D ? cast<ValueDecl>(D->getCanonicalDecl()) : nullptr;
     if (Cache.count(VD))
       continue;
@@ -715,7 +722,6 @@ OMPMapClause::Create(const ASTContext &C, SourceLocation StartLoc,
                      MappableExprComponentListsRef ComponentLists,
                      OpenMPMapClauseKind TypeModifier, OpenMPMapClauseKind Type,
                      bool TypeIsImplicit, SourceLocation TypeLoc) {
-
   unsigned NumVars = Vars.size();
   unsigned NumUniqueDeclarations =
       getUniqueDeclarationsTotalNumber(Declarations);

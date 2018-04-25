@@ -194,6 +194,14 @@ public:
                       const Stmt *First,
                       const Stmt *Second) const;
 
+  void emitNullArgBug(CheckerContext &C, ProgramStateRef State, const Stmt *S,
+                      StringRef WarningMsg) const;
+  void emitOutOfBoundsBug(CheckerContext &C, ProgramStateRef State,
+                          const Stmt *S, StringRef WarningMsg) const;
+  void emitNotCStringBug(CheckerContext &C, ProgramStateRef State,
+                         const Stmt *S, StringRef WarningMsg) const;
+  void emitAdditionOverflowBug(CheckerContext &C, ProgramStateRef State) const;
+
   ProgramStateRef checkAdditionOverflow(CheckerContext &C,
                                             ProgramStateRef state,
                                             NonLoc left,
@@ -239,30 +247,14 @@ ProgramStateRef CStringChecker::checkNonNull(CheckerContext &C,
   std::tie(stateNull, stateNonNull) = assumeZero(C, state, l, S->getType());
 
   if (stateNull && !stateNonNull) {
-    if (!Filter.CheckCStringNullArg)
-      return nullptr;
+    if (Filter.CheckCStringNullArg) {
+      SmallString<80> buf;
+      llvm::raw_svector_ostream os(buf);
+      assert(CurrentFunctionDescription);
+      os << "Null pointer argument in call to " << CurrentFunctionDescription;
 
-    ExplodedNode *N = C.generateErrorNode(stateNull);
-    if (!N)
-      return nullptr;
-
-    if (!BT_Null)
-      BT_Null.reset(new BuiltinBug(
-          Filter.CheckNameCStringNullArg, categories::UnixAPI,
-          "Null pointer argument in call to byte string function"));
-
-    SmallString<80> buf;
-    llvm::raw_svector_ostream os(buf);
-    assert(CurrentFunctionDescription);
-    os << "Null pointer argument in call to " << CurrentFunctionDescription;
-
-    // Generate a report for this bug.
-    BuiltinBug *BT = static_cast<BuiltinBug*>(BT_Null.get());
-    auto report = llvm::make_unique<BugReport>(*BT, os.str(), N);
-
-    report->addRange(S->getSourceRange());
-    bugreporter::trackNullOrUndefValue(N, S, *report);
-    C.emitReport(std::move(report));
+      emitNullArgBug(C, stateNull, S, os.str());
+    }
     return nullptr;
   }
 
@@ -289,8 +281,8 @@ ProgramStateRef CStringChecker::CheckLocation(CheckerContext &C,
   if (!ER)
     return state;
 
-  assert(ER->getValueType() == C.getASTContext().CharTy &&
-    "CheckLocation should only be called with char* ElementRegions");
+  if (ER->getValueType() != C.getASTContext().CharTy)
+    return state;
 
   // Get the size of the array.
   const SubRegion *superReg = cast<SubRegion>(ER->getSuperRegion());
@@ -305,21 +297,14 @@ ProgramStateRef CStringChecker::CheckLocation(CheckerContext &C,
   ProgramStateRef StInBound = state->assumeInBound(Idx, Size, true);
   ProgramStateRef StOutBound = state->assumeInBound(Idx, Size, false);
   if (StOutBound && !StInBound) {
-    ExplodedNode *N = C.generateErrorNode(StOutBound);
-    if (!N)
-      return nullptr;
+    // These checks are either enabled by the CString out-of-bounds checker
+    // explicitly or the "basic" CStringNullArg checker support that Malloc
+    // checker enables.
+    assert(Filter.CheckCStringOutOfBounds || Filter.CheckCStringNullArg);
 
-    if (!BT_Bounds) {
-      BT_Bounds.reset(new BuiltinBug(
-          Filter.CheckNameCStringOutOfBounds, "Out-of-bound array access",
-          "Byte string function accesses out-of-bound array element"));
-    }
-    BuiltinBug *BT = static_cast<BuiltinBug*>(BT_Bounds.get());
-
-    // Generate a report for this bug.
-    std::unique_ptr<BugReport> report;
+    // Emit a bug report.
     if (warningMsg) {
-      report = llvm::make_unique<BugReport>(*BT, warningMsg, N);
+      emitOutOfBoundsBug(C, StOutBound, S, warningMsg);
     } else {
       assert(CurrentFunctionDescription);
       assert(CurrentFunctionDescription[0] != '\0');
@@ -329,15 +314,8 @@ ProgramStateRef CStringChecker::CheckLocation(CheckerContext &C,
       os << toUppercase(CurrentFunctionDescription[0])
          << &CurrentFunctionDescription[1]
          << " accesses out-of-bound array element";
-      report = llvm::make_unique<BugReport>(*BT, os.str(), N);
+      emitOutOfBoundsBug(C, StOutBound, S, os.str());
     }
-
-    // FIXME: It would be nice to eventually make this diagnostic more clear,
-    // e.g., by referencing the original declaration or by saying *why* this
-    // reference is outside the range.
-
-    report->addRange(S->getSourceRange());
-    C.emitReport(std::move(report));
     return nullptr;
   }
 
@@ -366,7 +344,7 @@ ProgramStateRef CStringChecker::CheckBufferAccess(CheckerContext &C,
   QualType PtrTy = Ctx.getPointerType(Ctx.CharTy);
 
   // Check that the first buffer is non-null.
-  SVal BufVal = state->getSVal(FirstBuf, LCtx);
+  SVal BufVal = C.getSVal(FirstBuf);
   state = checkNonNull(C, state, FirstBuf, BufVal);
   if (!state)
     return nullptr;
@@ -378,15 +356,17 @@ ProgramStateRef CStringChecker::CheckBufferAccess(CheckerContext &C,
   // Get the access length and make sure it is known.
   // FIXME: This assumes the caller has already checked that the access length
   // is positive. And that it's unsigned.
-  SVal LengthVal = state->getSVal(Size, LCtx);
+  SVal LengthVal = C.getSVal(Size);
   Optional<NonLoc> Length = LengthVal.getAs<NonLoc>();
   if (!Length)
     return state;
 
   // Compute the offset of the last element to be accessed: size-1.
   NonLoc One = svalBuilder.makeIntVal(1, sizeTy).castAs<NonLoc>();
-  NonLoc LastOffset = svalBuilder
-      .evalBinOpNN(state, BO_Sub, *Length, One, sizeTy).castAs<NonLoc>();
+  SVal Offset = svalBuilder.evalBinOpNN(state, BO_Sub, *Length, One, sizeTy);
+  if (Offset.isUnknown())
+    return nullptr;
+  NonLoc LastOffset = Offset.castAs<NonLoc>();
 
   // Check that the first buffer is sufficiently long.
   SVal BufStart = svalBuilder.evalCast(BufVal, PtrTy, FirstBuf->getType());
@@ -555,6 +535,79 @@ void CStringChecker::emitOverlapBug(CheckerContext &C, ProgramStateRef state,
   C.emitReport(std::move(report));
 }
 
+void CStringChecker::emitNullArgBug(CheckerContext &C, ProgramStateRef State,
+                                    const Stmt *S, StringRef WarningMsg) const {
+  if (ExplodedNode *N = C.generateErrorNode(State)) {
+    if (!BT_Null)
+      BT_Null.reset(new BuiltinBug(
+          Filter.CheckNameCStringNullArg, categories::UnixAPI,
+          "Null pointer argument in call to byte string function"));
+
+    BuiltinBug *BT = static_cast<BuiltinBug *>(BT_Null.get());
+    auto Report = llvm::make_unique<BugReport>(*BT, WarningMsg, N);
+    bugreporter::trackNullOrUndefValue(N, S, *Report);
+    C.emitReport(std::move(Report));
+  }
+}
+
+void CStringChecker::emitOutOfBoundsBug(CheckerContext &C,
+                                        ProgramStateRef State, const Stmt *S,
+                                        StringRef WarningMsg) const {
+  if (ExplodedNode *N = C.generateErrorNode(State)) {
+    if (!BT_Bounds)
+      BT_Bounds.reset(new BuiltinBug(
+          Filter.CheckCStringOutOfBounds ? Filter.CheckNameCStringOutOfBounds
+                                         : Filter.CheckNameCStringNullArg,
+          "Out-of-bound array access",
+          "Byte string function accesses out-of-bound array element"));
+
+    BuiltinBug *BT = static_cast<BuiltinBug *>(BT_Bounds.get());
+
+    // FIXME: It would be nice to eventually make this diagnostic more clear,
+    // e.g., by referencing the original declaration or by saying *why* this
+    // reference is outside the range.
+    auto Report = llvm::make_unique<BugReport>(*BT, WarningMsg, N);
+    Report->addRange(S->getSourceRange());
+    C.emitReport(std::move(Report));
+  }
+}
+
+void CStringChecker::emitNotCStringBug(CheckerContext &C, ProgramStateRef State,
+                                       const Stmt *S,
+                                       StringRef WarningMsg) const {
+  if (ExplodedNode *N = C.generateNonFatalErrorNode(State)) {
+    if (!BT_NotCString)
+      BT_NotCString.reset(new BuiltinBug(
+          Filter.CheckNameCStringNotNullTerm, categories::UnixAPI,
+          "Argument is not a null-terminated string."));
+
+    auto Report = llvm::make_unique<BugReport>(*BT_NotCString, WarningMsg, N);
+
+    Report->addRange(S->getSourceRange());
+    C.emitReport(std::move(Report));
+  }
+}
+
+void CStringChecker::emitAdditionOverflowBug(CheckerContext &C,
+                                             ProgramStateRef State) const {
+  if (ExplodedNode *N = C.generateErrorNode(State)) {
+    if (!BT_NotCString)
+      BT_NotCString.reset(
+          new BuiltinBug(Filter.CheckNameCStringOutOfBounds, "API",
+                         "Sum of expressions causes overflow."));
+
+    // This isn't a great error message, but this should never occur in real
+    // code anyway -- you'd have to create a buffer longer than a size_t can
+    // represent, which is sort of a contradiction.
+    const char *WarningMsg =
+        "This expression will create a string whose length is too big to "
+        "be represented as a size_t";
+
+    auto Report = llvm::make_unique<BugReport>(*BT_NotCString, WarningMsg, N);
+    C.emitReport(std::move(Report));
+  }
+}
+
 ProgramStateRef CStringChecker::checkAdditionOverflow(CheckerContext &C,
                                                      ProgramStateRef state,
                                                      NonLoc left,
@@ -598,26 +651,7 @@ ProgramStateRef CStringChecker::checkAdditionOverflow(CheckerContext &C,
 
     if (stateOverflow && !stateOkay) {
       // We have an overflow. Emit a bug report.
-      ExplodedNode *N = C.generateErrorNode(stateOverflow);
-      if (!N)
-        return nullptr;
-
-      if (!BT_AdditionOverflow)
-        BT_AdditionOverflow.reset(
-            new BuiltinBug(Filter.CheckNameCStringOutOfBounds, "API",
-                           "Sum of expressions causes overflow"));
-
-      // This isn't a great error message, but this should never occur in real
-      // code anyway -- you'd have to create a buffer longer than a size_t can
-      // represent, which is sort of a contradiction.
-      const char *warning =
-        "This expression will create a string whose length is too big to "
-        "be represented as a size_t";
-
-      // Generate a report for this bug.
-      C.emitReport(
-          llvm::make_unique<BugReport>(*BT_AdditionOverflow, warning, N));
-
+      emitAdditionOverflowBug(C, stateOverflow);
       return nullptr;
     }
 
@@ -717,15 +751,7 @@ SVal CStringChecker::getCStringLength(CheckerContext &C, ProgramStateRef &state,
     // C string. In the context of locations, the only time we can issue such
     // a warning is for labels.
     if (Optional<loc::GotoLabel> Label = Buf.getAs<loc::GotoLabel>()) {
-      if (!Filter.CheckCStringNotNullTerm)
-        return UndefinedVal();
-
-      if (ExplodedNode *N = C.generateNonFatalErrorNode(state)) {
-        if (!BT_NotCString)
-          BT_NotCString.reset(new BuiltinBug(
-              Filter.CheckNameCStringNotNullTerm, categories::UnixAPI,
-              "Argument is not a null-terminated string."));
-
+      if (Filter.CheckCStringNotNullTerm) {
         SmallString<120> buf;
         llvm::raw_svector_ostream os(buf);
         assert(CurrentFunctionDescription);
@@ -733,14 +759,9 @@ SVal CStringChecker::getCStringLength(CheckerContext &C, ProgramStateRef &state,
            << " is the address of the label '" << Label->getLabel()->getName()
            << "', which is not a null-terminated string";
 
-        // Generate a report for this bug.
-        auto report = llvm::make_unique<BugReport>(*BT_NotCString, os.str(), N);
-
-        report->addRange(Ex->getSourceRange());
-        C.emitReport(std::move(report));
+        emitNotCStringBug(C, state, Ex, os.str());
       }
       return UndefinedVal();
-
     }
 
     // If it's not a region and not a label, give up.
@@ -777,15 +798,7 @@ SVal CStringChecker::getCStringLength(CheckerContext &C, ProgramStateRef &state,
     // Other regions (mostly non-data) can't have a reliable C string length.
     // In this case, an error is emitted and UndefinedVal is returned.
     // The caller should always be prepared to handle this case.
-    if (!Filter.CheckCStringNotNullTerm)
-      return UndefinedVal();
-
-    if (ExplodedNode *N = C.generateNonFatalErrorNode(state)) {
-      if (!BT_NotCString)
-        BT_NotCString.reset(new BuiltinBug(
-            Filter.CheckNameCStringNotNullTerm, categories::UnixAPI,
-            "Argument is not a null-terminated string."));
-
+    if (Filter.CheckCStringNotNullTerm) {
       SmallString<120> buf;
       llvm::raw_svector_ostream os(buf);
 
@@ -797,13 +810,8 @@ SVal CStringChecker::getCStringLength(CheckerContext &C, ProgramStateRef &state,
       else
         os << "not a null-terminated string";
 
-      // Generate a report for this bug.
-      auto report = llvm::make_unique<BugReport>(*BT_NotCString, os.str(), N);
-
-      report->addRange(Ex->getSourceRange());
-      C.emitReport(std::move(report));
+      emitNotCStringBug(C, state, Ex, os.str());
     }
-
     return UndefinedVal();
   }
 }
@@ -852,9 +860,10 @@ bool CStringChecker::IsFirstBufInBound(CheckerContext &C,
 
   // Compute the offset of the last element to be accessed: size-1.
   NonLoc One = svalBuilder.makeIntVal(1, sizeTy).castAs<NonLoc>();
-  NonLoc LastOffset =
-      svalBuilder.evalBinOpNN(state, BO_Sub, *Length, One, sizeTy)
-          .castAs<NonLoc>();
+  SVal Offset = svalBuilder.evalBinOpNN(state, BO_Sub, *Length, One, sizeTy);
+  if (Offset.isUnknown())
+    return true; // cf top comment
+  NonLoc LastOffset = Offset.castAs<NonLoc>();
 
   // Check that the first buffer is sufficiently long.
   SVal BufStart = svalBuilder.evalCast(BufVal, PtrTy, FirstBuf->getType());
@@ -874,6 +883,8 @@ bool CStringChecker::IsFirstBufInBound(CheckerContext &C,
   if (!ER)
     return true; // cf top comment.
 
+  // FIXME: Does this crash when a non-standard definition
+  // of a library function is encountered?
   assert(ER->getValueType() == C.getASTContext().CharTy &&
          "IsFirstBufInBound should only be called with char* ElementRegions");
 
@@ -1050,31 +1061,22 @@ void CStringChecker::evalCopyCommon(CheckerContext &C,
     // If this is mempcpy, get the byte after the last byte copied and
     // bind the expr.
     if (IsMempcpy) {
-      loc::MemRegionVal destRegVal = destVal.castAs<loc::MemRegionVal>();
-
-      // Get the length to copy.
-      if (Optional<NonLoc> lenValNonLoc = sizeVal.getAs<NonLoc>()) {
-        // Get the byte after the last byte copied.
-        SValBuilder &SvalBuilder = C.getSValBuilder();
-        ASTContext &Ctx = SvalBuilder.getContext();
-        QualType CharPtrTy = Ctx.getPointerType(Ctx.CharTy);
-        loc::MemRegionVal DestRegCharVal = SvalBuilder.evalCast(destRegVal,
-          CharPtrTy, Dest->getType()).castAs<loc::MemRegionVal>();
-        SVal lastElement = C.getSValBuilder().evalBinOpLN(state, BO_Add,
-                                                          DestRegCharVal,
-                                                          *lenValNonLoc,
-                                                          Dest->getType());
-
-        // The byte after the last byte copied is the return value.
-        state = state->BindExpr(CE, LCtx, lastElement);
-      } else {
-        // If we don't know how much we copied, we can at least
-        // conjure a return value for later.
-        SVal result = C.getSValBuilder().conjureSymbolVal(nullptr, CE, LCtx,
+      // Get the byte after the last byte copied.
+      SValBuilder &SvalBuilder = C.getSValBuilder();
+      ASTContext &Ctx = SvalBuilder.getContext();
+      QualType CharPtrTy = Ctx.getPointerType(Ctx.CharTy);
+      SVal DestRegCharVal =
+          SvalBuilder.evalCast(destVal, CharPtrTy, Dest->getType());
+      SVal lastElement = C.getSValBuilder().evalBinOp(
+          state, BO_Add, DestRegCharVal, sizeVal, Dest->getType());
+      // If we don't know how much we copied, we can at least
+      // conjure a return value for later.
+      if (lastElement.isUnknown())
+        lastElement = C.getSValBuilder().conjureSymbolVal(nullptr, CE, LCtx,
                                                           C.blockCount());
-        state = state->BindExpr(CE, LCtx, result);
-      }
 
+      // The byte after the last byte copied is the return value.
+      state = state->BindExpr(CE, LCtx, lastElement);
     } else {
       // All other copies return the destination buffer.
       // (Well, bcopy() has a void return type, but this won't hurt.)
@@ -2156,7 +2158,7 @@ void CStringChecker::checkPreStmt(const DeclStmt *DS, CheckerContext &C) const {
     if (!MR)
       continue;
 
-    SVal StrVal = state->getSVal(Init, C.getLocationContext());
+    SVal StrVal = C.getSVal(Init);
     assert(StrVal.isValid() && "Initializer string is unknown or undefined");
     DefinedOrUnknownSVal strLength =
         getCStringLength(C, state, Init, StrVal).castAs<DefinedOrUnknownSVal>();

@@ -32,7 +32,7 @@
  * compatible, thus CINDEX_VERSION_MAJOR is expected to remain stable.
  */
 #define CINDEX_VERSION_MAJOR 0
-#define CINDEX_VERSION_MINOR 43
+#define CINDEX_VERSION_MINOR 48
 
 #define CINDEX_VERSION_ENCODE(major, minor) ( \
       ((major) * 10000)                       \
@@ -334,6 +334,16 @@ CINDEX_LINKAGE void clang_CXIndex_setGlobalOptions(CXIndex, unsigned options);
 CINDEX_LINKAGE unsigned clang_CXIndex_getGlobalOptions(CXIndex);
 
 /**
+ * \brief Sets the invocation emission path option in a CXIndex.
+ *
+ * The invocation emission path specifies a path which will contain log
+ * files for certain libclang invocations. A null value (default) implies that
+ * libclang invocations are not logged..
+ */
+CINDEX_LINKAGE void
+clang_CXIndex_setInvocationEmissionPathOption(CXIndex, const char *Path);
+
+/**
  * \defgroup CINDEX_FILES File manipulation routines
  *
  * @{
@@ -394,10 +404,32 @@ CINDEX_LINKAGE CXFile clang_getFile(CXTranslationUnit tu,
                                     const char *file_name);
 
 /**
+ * \brief Retrieve the buffer associated with the given file.
+ *
+ * \param tu the translation unit
+ *
+ * \param file the file for which to retrieve the buffer.
+ *
+ * \param size [out] if non-NULL, will be set to the size of the buffer.
+ *
+ * \returns a pointer to the buffer in memory that holds the contents of
+ * \p file, or a NULL pointer when the file is not loaded.
+ */
+CINDEX_LINKAGE const char *clang_getFileContents(CXTranslationUnit tu,
+                                                 CXFile file, size_t *size);
+
+/**
  * \brief Returns non-zero if the \c file1 and \c file2 point to the same file,
  * or they are both NULL.
  */
 CINDEX_LINKAGE int clang_File_isEqual(CXFile file1, CXFile file2);
+
+/**
+ * \brief Returns the real path name of \c file.
+ *
+ * An empty string may be returned. Use \c clang_getFileName() in that case.
+ */
+CINDEX_LINKAGE CXString clang_File_tryGetRealPathName(CXFile file);
 
 /**
  * @}
@@ -2617,6 +2649,16 @@ CINDEX_LINKAGE enum CXCursorKind clang_getCursorKind(CXCursor);
 CINDEX_LINKAGE unsigned clang_isDeclaration(enum CXCursorKind);
 
 /**
+ * \brief Determine whether the given declaration is invalid.
+ *
+ * A declaration is invalid if it could not be parsed successfully.
+ *
+ * \returns non-zero if the cursor represents a declaration and it is
+ * invalid, otherwise NULL.
+ */
+CINDEX_LINKAGE unsigned clang_isInvalidDeclaration(CXCursor);
+
+/**
  * \brief Determine whether the given cursor kind represents a simple
  * reference.
  *
@@ -2835,6 +2877,22 @@ enum CXLanguageKind {
  * \brief Determine the "language" of the entity referred to by a given cursor.
  */
 CINDEX_LINKAGE enum CXLanguageKind clang_getCursorLanguage(CXCursor cursor);
+
+/**
+ * \brief Describe the "thread-local storage (TLS) kind" of the declaration
+ * referred to by a cursor.
+ */
+enum CXTLSKind {
+  CXTLS_None = 0,
+  CXTLS_Dynamic,
+  CXTLS_Static
+};
+
+/**
+ * \brief Determine the "thread-local storage (TLS) kind" of the declaration
+ * referred to by a cursor.
+ */
+CINDEX_LINKAGE enum CXTLSKind clang_getCursorTLSKind(CXCursor cursor);
 
 /**
  * \brief Returns the translation unit that a cursor originated from.
@@ -3115,8 +3173,9 @@ enum CXTypeKind {
   CXType_ObjCSel = 29,
   CXType_Float128 = 30,
   CXType_Half = 31,
+  CXType_Float16 = 32,
   CXType_FirstBuiltin = CXType_Void,
-  CXType_LastBuiltin  = CXType_Half,
+  CXType_LastBuiltin  = CXType_Float16,
 
   CXType_Complex = 100,
   CXType_Pointer = 101,
@@ -4040,6 +4099,89 @@ CINDEX_LINKAGE CXSourceRange clang_Cursor_getSpellingNameRange(CXCursor,
                                                           unsigned options);
 
 /**
+ * \brief Opaque pointer representing a policy that controls pretty printing
+ * for \c clang_getCursorPrettyPrinted.
+ */
+typedef void *CXPrintingPolicy;
+
+/**
+ * \brief Properties for the printing policy.
+ *
+ * See \c clang::PrintingPolicy for more information.
+ */
+enum CXPrintingPolicyProperty {
+  CXPrintingPolicy_Indentation,
+  CXPrintingPolicy_SuppressSpecifiers,
+  CXPrintingPolicy_SuppressTagKeyword,
+  CXPrintingPolicy_IncludeTagDefinition,
+  CXPrintingPolicy_SuppressScope,
+  CXPrintingPolicy_SuppressUnwrittenScope,
+  CXPrintingPolicy_SuppressInitializers,
+  CXPrintingPolicy_ConstantArraySizeAsWritten,
+  CXPrintingPolicy_AnonymousTagLocations,
+  CXPrintingPolicy_SuppressStrongLifetime,
+  CXPrintingPolicy_SuppressLifetimeQualifiers,
+  CXPrintingPolicy_SuppressTemplateArgsInCXXConstructors,
+  CXPrintingPolicy_Bool,
+  CXPrintingPolicy_Restrict,
+  CXPrintingPolicy_Alignof,
+  CXPrintingPolicy_UnderscoreAlignof,
+  CXPrintingPolicy_UseVoidForZeroParams,
+  CXPrintingPolicy_TerseOutput,
+  CXPrintingPolicy_PolishForDeclaration,
+  CXPrintingPolicy_Half,
+  CXPrintingPolicy_MSWChar,
+  CXPrintingPolicy_IncludeNewlines,
+  CXPrintingPolicy_MSVCFormatting,
+  CXPrintingPolicy_ConstantsAsWritten,
+  CXPrintingPolicy_SuppressImplicitBase,
+  CXPrintingPolicy_FullyQualifiedName,
+
+  CXPrintingPolicy_LastProperty = CXPrintingPolicy_FullyQualifiedName
+};
+
+/**
+ * \brief Get a property value for the given printing policy.
+ */
+CINDEX_LINKAGE unsigned
+clang_PrintingPolicy_getProperty(CXPrintingPolicy Policy,
+                                 enum CXPrintingPolicyProperty Property);
+
+/**
+ * \brief Set a property value for the given printing policy.
+ */
+CINDEX_LINKAGE void clang_PrintingPolicy_setProperty(CXPrintingPolicy Policy,
+                                                     enum CXPrintingPolicyProperty Property,
+                                                     unsigned Value);
+
+/**
+ * \brief Retrieve the default policy for the cursor.
+ *
+ * The policy should be released after use with \c
+ * clang_PrintingPolicy_dispose.
+ */
+CINDEX_LINKAGE CXPrintingPolicy clang_getCursorPrintingPolicy(CXCursor);
+
+/**
+ * \brief Release a printing policy.
+ */
+CINDEX_LINKAGE void clang_PrintingPolicy_dispose(CXPrintingPolicy Policy);
+
+/**
+ * \brief Pretty print declarations.
+ *
+ * \param Cursor The cursor representing a declaration.
+ *
+ * \param Policy The policy to control the entities being printed. If
+ * NULL, a default policy is used.
+ *
+ * \returns The pretty printed declaration or the empty string for
+ * other cursors.
+ */
+CINDEX_LINKAGE CXString clang_getCursorPrettyPrinted(CXCursor Cursor,
+                                                     CXPrintingPolicy Policy);
+
+/**
  * \brief Retrieve the display name for the entity referenced by this cursor.
  *
  * The display name contains extra information that helps identify the cursor,
@@ -4276,6 +4418,12 @@ CINDEX_LINKAGE CXString clang_Cursor_getMangling(CXCursor);
 CINDEX_LINKAGE CXStringSet *clang_Cursor_getCXXManglings(CXCursor);
 
 /**
+ * \brief Retrieve the CXStrings representing the mangled symbols of the ObjC
+ * class interface or implementation at the cursor.
+ */
+CINDEX_LINKAGE CXStringSet *clang_Cursor_getObjCManglings(CXCursor);
+
+/**
  * @}
  */
 
@@ -4417,6 +4565,12 @@ CINDEX_LINKAGE unsigned clang_CXXMethod_isStatic(CXCursor C);
  * one of the base classes.
  */
 CINDEX_LINKAGE unsigned clang_CXXMethod_isVirtual(CXCursor C);
+
+/**
+ * \brief Determine if a C++ record is abstract, i.e. whether a class or struct
+ * has a pure virtual member function.
+ */
+CINDEX_LINKAGE unsigned clang_CXXRecord_isAbstract(CXCursor C);
 
 /**
  * \brief Determine if an enum declaration refers to a scoped enum.
@@ -4841,7 +4995,7 @@ enum CXCompletionChunkKind {
    * for "int x", indicating that the current argument will initialize that
    * parameter. After typing further, to \c add(17, (where the code-completion
    * point is after the ","), the code-completion string will contain a
-   * "current paremeter" chunk to "int y".
+   * "current parameter" chunk to "int y".
    */
   CXCompletionChunk_CurrentParameter,
   /**
@@ -5097,7 +5251,14 @@ enum CXCodeComplete_Flags {
    * \brief Whether to include brief documentation within the set of code
    * completions returned.
    */
-  CXCodeComplete_IncludeBriefComments = 0x04
+  CXCodeComplete_IncludeBriefComments = 0x04,
+
+  /**
+   * Whether to speed up completion by omitting top- or namespace-level entities
+   * defined in the preamble. There's no guarantee any particular entity is
+   * omitted. This may be useful if the headers are indexed externally.
+   */
+  CXCodeComplete_SkipPreamble = 0x08
 };
 
 /**
@@ -5255,7 +5416,7 @@ CINDEX_LINKAGE unsigned clang_defaultCodeCompleteOptions(void);
  * user types punctuation characters or whitespace, at which point the
  * code-completion location will coincide with the cursor. For example, if \c p
  * is a pointer, code-completion might be triggered after the "-" and then
- * after the ">" in \c p->. When the code-completion location is afer the ">",
+ * after the ">" in \c p->. When the code-completion location is after the ">",
  * the completion results will provide, e.g., the members of the struct that
  * "p" points to. The client is responsible for placing the cursor at the
  * beginning of the token currently being typed, then filtering the results
@@ -5938,6 +6099,9 @@ typedef struct {
 
 /**
  * \brief Data for IndexerCallbacks#indexEntityReference.
+ *
+ * This may be deprecated in a future version as this duplicates
+ * the \c CXSymbolRole_Implicit bit in \c CXSymbolRole.
  */
 typedef enum {
   /**
@@ -5950,6 +6114,25 @@ typedef enum {
    */
   CXIdxEntityRef_Implicit = 2
 } CXIdxEntityRefKind;
+
+/**
+ * \brief Roles that are attributed to symbol occurrences.
+ *
+ * Internal: this currently mirrors low 9 bits of clang::index::SymbolRole with
+ * higher bits zeroed. These high bits may be exposed in the future.
+ */
+typedef enum {
+  CXSymbolRole_None = 0,
+  CXSymbolRole_Declaration = 1 << 0,
+  CXSymbolRole_Definition = 1 << 1,
+  CXSymbolRole_Reference = 1 << 2,
+  CXSymbolRole_Read = 1 << 3,
+  CXSymbolRole_Write = 1 << 4,
+  CXSymbolRole_Call = 1 << 5,
+  CXSymbolRole_Dynamic = 1 << 6,
+  CXSymbolRole_AddressOf = 1 << 7,
+  CXSymbolRole_Implicit = 1 << 8
+} CXSymbolRole;
 
 /**
  * \brief Data for IndexerCallbacks#indexEntityReference.
@@ -5981,6 +6164,10 @@ typedef struct {
    * \brief Lexical container context of the reference.
    */
   const CXIdxContainerInfo *container;
+  /**
+   * \brief Sets of symbol roles of the reference.
+   */
+  CXSymbolRole role;
 } CXIdxEntityRefInfo;
 
 /**

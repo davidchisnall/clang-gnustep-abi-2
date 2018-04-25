@@ -103,7 +103,7 @@ public:
   void VisitUnresolvedUsingTypenameDecl(const UnresolvedUsingTypenameDecl *D);
 
   void VisitLinkageSpecDecl(const LinkageSpecDecl *D) {
-    IgnoreResults = true;
+    IgnoreResults = true; // No USRs for linkage specs themselves.
   }
 
   void VisitUsingDirectiveDecl(const UsingDirectiveDecl *D) {
@@ -192,6 +192,8 @@ bool USRGenerator::ShouldGenerateLocation(const NamedDecl *D) {
 void USRGenerator::VisitDeclContext(const DeclContext *DC) {
   if (const NamedDecl *D = dyn_cast<NamedDecl>(DC))
     Visit(D);
+  else if (isa<LinkageSpecDecl>(DC)) // Linkage specs are transparent in USRs.
+    VisitDeclContext(DC->getParent());
 }
 
 void USRGenerator::VisitFieldDecl(const FieldDecl *D) {
@@ -680,6 +682,7 @@ void USRGenerator::VisitType(QualType T) {
           c = 'K'; break;
         case BuiltinType::Int128:
           c = 'J'; break;
+        case BuiltinType::Float16:
         case BuiltinType::Half:
           c = 'h'; break;
         case BuiltinType::Float:
@@ -753,8 +756,12 @@ void USRGenerator::VisitType(QualType T) {
     if (const FunctionProtoType *FT = T->getAs<FunctionProtoType>()) {
       Out << 'F';
       VisitType(FT->getReturnType());
-      for (const auto &I : FT->param_types())
+      Out << '(';
+      for (const auto &I : FT->param_types()) {
+        Out << '#';
         VisitType(I);
+      }
+      Out << ')';
       if (FT->isVariadic())
         Out << '.';
       return;
@@ -813,6 +820,25 @@ void USRGenerator::VisitType(QualType T) {
       Out << (T->isExtVectorType() ? ']' : '[');
       Out << VT->getNumElements();
       T = VT->getElementType();
+      continue;
+    }
+    if (const auto *const AT = dyn_cast<ArrayType>(T)) {
+      Out << '{';
+      switch (AT->getSizeModifier()) {
+      case ArrayType::Static:
+        Out << 's';
+        break;
+      case ArrayType::Star:
+        Out << '*';
+        break;
+      case ArrayType::Normal:
+        Out << 'n';
+        break;
+      }
+      if (const auto *const CAT = dyn_cast<ConstantArrayType>(T))
+        Out << CAT->getSize();
+
+      T = AT->getElementType();
       continue;
     }
 

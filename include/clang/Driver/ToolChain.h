@@ -1,4 +1,4 @@
-//===--- ToolChain.h - Collections of tools for one platform ----*- C++ -*-===//
+//===- ToolChain.h - Collections of tools for one platform ------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,58 +10,70 @@
 #ifndef LLVM_CLANG_DRIVER_TOOLCHAIN_H
 #define LLVM_CLANG_DRIVER_TOOLCHAIN_H
 
+#include "clang/Basic/LLVM.h"
 #include "clang/Basic/Sanitizers.h"
 #include "clang/Basic/VersionTuple.h"
 #include "clang/Driver/Action.h"
 #include "clang/Driver/Multilib.h"
 #include "clang/Driver/Types.h"
-#include "clang/Driver/Util.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/MC/MCTargetOptions.h"
+#include "llvm/Option/Option.h"
 #include "llvm/Target/TargetOptions.h"
+#include <cassert>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace llvm {
 namespace opt {
-  class ArgList;
-  class DerivedArgList;
-  class InputArgList;
-}
-}
+
+class Arg;
+class ArgList;
+class DerivedArgList;
+
+} // namespace opt
+} // namespace llvm
 
 namespace clang {
+
 class ObjCRuntime;
+
 namespace vfs {
+
 class FileSystem;
-}
+
+} // namespace vfs
 
 namespace driver {
-  class Compilation;
-  class CudaInstallationDetector;
-  class Driver;
-  class JobAction;
-  class RegisterEffectiveTriple;
-  class SanitizerArgs;
-  class Tool;
-  class XRayArgs;
+
+class Driver;
+class InputInfo;
+class SanitizerArgs;
+class Tool;
+class XRayArgs;
 
 /// Helper structure used to pass information extracted from clang executable
 /// name such as `i686-linux-android-g++`.
-///
 struct ParsedClangName {
   /// Target part of the executable name, as `i686-linux-android`.
   std::string TargetPrefix;
+
   /// Driver mode part of the executable name, as `g++`.
   std::string ModeSuffix;
-  /// Corresponding driver mode argument, as '--driver-mode=g++'
-  const char *DriverMode;
-  /// True if TargetPrefix is recognized as a registered target name.
-  bool TargetIsValid;
 
-  ParsedClangName() : DriverMode(nullptr), TargetIsValid(false) {}
+  /// Corresponding driver mode argument, as '--driver-mode=g++'
+  const char *DriverMode = nullptr;
+
+  /// True if TargetPrefix is recognized as a registered target name.
+  bool TargetIsValid = false;
+
+  ParsedClangName() = default;
   ParsedClangName(std::string Suffix, const char *Mode)
-      : ModeSuffix(Suffix), DriverMode(Mode), TargetIsValid(false) {}
+      : ModeSuffix(Suffix), DriverMode(Mode) {}
   ParsedClangName(std::string Target, std::string Suffix, const char *Mode,
                   bool IsRegistered)
       : TargetPrefix(Target), ModeSuffix(Suffix), DriverMode(Mode),
@@ -71,7 +83,7 @@ struct ParsedClangName {
 /// ToolChain - Access to tools for a single platform.
 class ToolChain {
 public:
-  typedef SmallVector<std::string, 16> path_list;
+  using path_list = SmallVector<std::string, 16>;
 
   enum CXXStdlibType {
     CST_Libcxx,
@@ -91,25 +103,28 @@ public:
   };
 
 private:
+  friend class RegisterEffectiveTriple;
+
   const Driver &D;
-  const llvm::Triple Triple;
+  llvm::Triple Triple;
   const llvm::opt::ArgList &Args;
+
   // We need to initialize CachedRTTIArg before CachedRTTIMode
   const llvm::opt::Arg *const CachedRTTIArg;
+
   const RTTIMode CachedRTTIMode;
 
-  /// The list of toolchain specific path prefixes to search for
-  /// files.
+  /// The list of toolchain specific path prefixes to search for files.
   path_list FilePaths;
 
-  /// The list of toolchain specific path prefixes to search for
-  /// programs.
+  /// The list of toolchain specific path prefixes to search for programs.
   path_list ProgramPaths;
 
   mutable std::unique_ptr<Tool> Clang;
   mutable std::unique_ptr<Tool> Assemble;
   mutable std::unique_ptr<Tool> Link;
   mutable std::unique_ptr<Tool> OffloadBundler;
+
   Tool *getClang() const;
   Tool *getAssemble() const;
   Tool *getLink() const;
@@ -127,13 +142,13 @@ private:
     EffectiveTriple = std::move(ET);
   }
 
-  friend class RegisterEffectiveTriple;
-
 protected:
   MultilibSet Multilibs;
 
   ToolChain(const Driver &D, const llvm::Triple &T,
             const llvm::opt::ArgList &Args);
+
+  void setTripleEnvironment(llvm::Triple::EnvironmentType Env);
 
   virtual Tool *buildAssembler() const;
   virtual Tool *buildLinker() const;
@@ -171,6 +186,11 @@ public:
   /// example when compiling CUDA code for the GPU, the triple might be NVPTX,
   /// while the aux triple is the host (CPU) toolchain, e.g. x86-linux-gnu.
   virtual const llvm::Triple *getAuxTriple() const { return nullptr; }
+
+  /// Some toolchains need to modify the file name, for example to replace the
+  /// extension for object files with .cubin for OpenMP offloading to Nvidia
+  /// GPUs.
+  virtual std::string getInputFilename(const InputInfo &Input) const;
 
   llvm::Triple::ArchType getArch() const { return Triple.getArch(); }
   StringRef getArchName() const { return Triple.getArchName(); }
@@ -223,7 +243,6 @@ public:
   /// e.g., argv[0]).
   /// \return A structure of type ParsedClangName that contains the executable
   /// name parts.
-  ///
   static ParsedClangName getTargetAndModeFromProgramName(StringRef ProgName);
 
   // Tool access.
@@ -245,13 +264,9 @@ public:
   /// TranslateOpenMPTargetArgs - Create a new derived argument list for
   /// that contains the OpenMP target specific flags passed via
   /// -Xopenmp-target -opt=val OR -Xopenmp-target=<triple> -opt=val
-  /// Translation occurs only when the \p DeviceOffloadKind is specified.
-  ///
-  /// \param DeviceOffloadKind - The device offload kind used for the
-  /// translation.
-  virtual llvm::opt::DerivedArgList *
-  TranslateOpenMPTargetArgs(const llvm::opt::DerivedArgList &Args,
-      Action::OffloadKind DeviceOffloadKind) const;
+  virtual llvm::opt::DerivedArgList *TranslateOpenMPTargetArgs(
+      const llvm::opt::DerivedArgList &Args, bool SameTripleAsHost,
+      SmallVectorImpl<llvm::opt::Arg *> &AllocatedArgs) const;
 
   /// Choose a tool to use to handle the action \p JA.
   ///
@@ -314,6 +329,9 @@ public:
   /// mixed dispatch method be used?
   virtual bool UseObjCMixedDispatch() const { return false; }
 
+  /// \brief Check whether to enable x86 relax relocations by default.
+  virtual bool useRelaxRelocations() const;
+
   /// GetDefaultStackProtectorLevel - Get the default stack protector level for
   /// this tool chain (0=off, 1=on, 2=strong, 3=all).
   virtual unsigned GetDefaultStackProtectorLevel(bool KernelOrKext) const {
@@ -321,9 +339,7 @@ public:
   }
 
   /// GetDefaultLinker - Get the default linker to use.
-  virtual const char *getDefaultLinker() const {
-    return "ld";
-  }
+  virtual const char *getDefaultLinker() const { return "ld"; }
 
   /// GetDefaultRuntimeLibType - Get the default runtime library variant to use.
   virtual RuntimeLibType GetDefaultRuntimeLibType() const {
@@ -348,6 +364,9 @@ public:
   // as OpenMP) to find arch-specific libraries.
   std::string getArchSpecificLibPath() const;
 
+  // Returns <OSname> part of above.
+  StringRef getOSLibName() const;
+
   /// needsProfileRT - returns true if instrumentation profile is on.
   static bool needsProfileRT(const llvm::opt::ArgList &Args);
 
@@ -369,9 +388,6 @@ public:
 
   /// SupportsProfiling - Does this tool chain support -pg.
   virtual bool SupportsProfiling() const { return true; }
-
-  /// Does this tool chain support Objective-C garbage collection.
-  virtual bool SupportsObjCGC() const { return true; }
 
   /// Complain if this tool chain doesn't support Objective-C ARC.
   virtual void CheckObjCARC() const {}
@@ -395,15 +411,12 @@ public:
     return llvm::DebuggerKind::GDB;
   }
 
-  /// UseSjLjExceptions - Does this tool chain use SjLj exceptions.
-  virtual bool UseSjLjExceptions(const llvm::opt::ArgList &Args) const {
-    return false;
-  }
+  /// GetExceptionModel - Return the tool chain exception model.
+  virtual llvm::ExceptionHandling
+  GetExceptionModel(const llvm::opt::ArgList &Args) const;
 
   /// SupportsEmbeddedBitcode - Does this tool chain support embedded bitcode.
-  virtual bool SupportsEmbeddedBitcode() const {
-    return false;
-  }
+  virtual bool SupportsEmbeddedBitcode() const { return false; }
 
   /// getThreadModel() - Which thread model does this target use?
   virtual std::string getThreadModel() const { return "posix"; }
@@ -494,6 +507,7 @@ public:
   /// This checks for presence of the -Ofast, -ffast-math or -funsafe-math flags.
   virtual bool AddFastMathRuntimeIfAvailable(
       const llvm::opt::ArgList &Args, llvm::opt::ArgStringList &CmdArgs) const;
+
   /// addProfileRTLibs - When -fprofile-instr-profile is specified, try to pass
   /// a suitable profile runtime library to the linker.
   virtual void addProfileRTLibs(const llvm::opt::ArgList &Args,
@@ -531,7 +545,8 @@ public:
   ~RegisterEffectiveTriple() { TC.setEffectiveTriple(llvm::Triple()); }
 };
 
-} // end namespace driver
-} // end namespace clang
+} // namespace driver
 
-#endif
+} // namespace clang
+
+#endif // LLVM_CLANG_DRIVER_TOOLCHAIN_H

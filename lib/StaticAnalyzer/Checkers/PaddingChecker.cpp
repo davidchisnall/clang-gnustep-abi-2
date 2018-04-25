@@ -237,7 +237,7 @@ public:
     };
     std::transform(RD->field_begin(), RD->field_end(),
                    std::back_inserter(Fields), GatherSizesAndAlignments);
-    std::sort(Fields.begin(), Fields.end());
+    llvm::sort(Fields.begin(), Fields.end());
     // This lets us skip over vptrs and non-virtual bases,
     // so that we can just worry about the fields in our object.
     // Note that this does cause us to miss some cases where we
@@ -293,7 +293,9 @@ public:
     SmallString<100> Buf;
     llvm::raw_svector_ostream Os(Buf);
     Os << "Excessive padding in '";
-    Os << QualType::getAsString(RD->getTypeForDecl(), Qualifiers()) << "'";
+    Os << QualType::getAsString(RD->getTypeForDecl(), Qualifiers(),
+                                LangOptions())
+       << "'";
 
     if (auto *TSD = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
       // TODO: make this show up better in the console output and in

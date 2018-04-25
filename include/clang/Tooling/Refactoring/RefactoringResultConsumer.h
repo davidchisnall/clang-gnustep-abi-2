@@ -12,6 +12,7 @@
 
 #include "clang/Basic/LLVM.h"
 #include "clang/Tooling/Refactoring/AtomicChange.h"
+#include "clang/Tooling/Refactoring/Rename/SymbolOccurrences.h"
 #include "llvm/Support/Error.h"
 
 namespace clang {
@@ -25,14 +26,18 @@ class RefactoringResultConsumer {
 public:
   virtual ~RefactoringResultConsumer() {}
 
-  /// Handles an initation or an invication error. An initiation error typically
-  /// has a \c DiagnosticError payload that describes why initation failed.
+  /// Handles an initiation or an invication error. An initiation error typically
+  /// has a \c DiagnosticError payload that describes why initiation failed.
   virtual void handleError(llvm::Error Err) = 0;
 
   /// Handles the source replacements that are produced by a refactoring action.
   virtual void handle(AtomicChanges SourceReplacements) {
     defaultResultHandler();
   }
+
+  /// Handles the symbol occurrences that are found by an interactive
+  /// refactoring action.
+  virtual void handle(SymbolOccurrences Occurrences) { defaultResultHandler(); }
 
 private:
   void defaultResultHandler() {
@@ -41,29 +46,6 @@ private:
   }
 };
 
-namespace traits {
-namespace internal {
-
-template <typename T> struct HasHandle {
-private:
-  template <typename ClassT>
-  static auto check(ClassT *) -> typename std::is_same<
-      decltype(std::declval<ClassT>().handle(std::declval<T>())), void>::type;
-
-  template <typename> static std::false_type check(...);
-
-public:
-  using Type = decltype(check<RefactoringResultConsumer>(nullptr));
-};
-
-} // end namespace internal
-
-/// A type trait that returns true iff the given type is a valid refactoring
-/// result.
-template <typename T>
-struct IsValidRefactoringResult : internal::HasHandle<T>::Type {};
-
-} // end namespace traits
 } // end namespace tooling
 } // end namespace clang
 

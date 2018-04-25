@@ -544,6 +544,7 @@ NumericLiteralParser::NumericLiteralParser(StringRef TokSpelling,
   isHalf = false;
   isFloat = false;
   isImaginary = false;
+  isFloat16 = false;
   isFloat128 = false;
   MicrosoftInteger = 0;
   hadError = false;
@@ -588,6 +589,13 @@ NumericLiteralParser::NumericLiteralParser(StringRef TokSpelling,
       if (!isFPConstant) break;  // Error for integer constant.
       if (isHalf || isFloat || isLong || isFloat128)
         break; // HF, FF, LF, QF invalid.
+
+      if (s + 2 < ThisTokEnd && s[1] == '1' && s[2] == '6') {
+          s += 2; // success, eat up 2 characters.
+          isFloat16 = true;
+          continue;
+      }
+
       isFloat = true;
       continue;  // Success.
     case 'q':    // FP Suffix for "__float128"
@@ -681,6 +689,7 @@ NumericLiteralParser::NumericLiteralParser(StringRef TokSpelling,
         isUnsigned = false;
         isLongLong = false;
         isFloat = false;
+        isFloat16 = false;
         isHalf = false;
         isImaginary = false;
         MicrosoftInteger = 0;
@@ -729,15 +738,17 @@ void NumericLiteralParser::ParseDecimalOrOctalCommon(SourceLocation TokLoc){
     s++;
     radix = 10;
     saw_exponent = true;
-    if (*s == '+' || *s == '-')  s++; // sign
+    if (s != ThisTokEnd && (*s == '+' || *s == '-'))  s++; // sign
     const char *first_non_digit = SkipDigits(s);
     if (containsDigits(s, first_non_digit)) {
       checkSeparator(TokLoc, s, CSK_BeforeDigits);
       s = first_non_digit;
     } else {
-      PP.Diag(PP.AdvanceToTokenCharacter(TokLoc, Exponent-ThisTokBegin),
-              diag::err_exponent_has_no_digits);
-      hadError = true;
+      if (!hadError) {
+        PP.Diag(PP.AdvanceToTokenCharacter(TokLoc, Exponent-ThisTokBegin),
+                diag::err_exponent_has_no_digits);
+        hadError = true;
+      }
       return;
     }
   }
@@ -778,10 +789,12 @@ void NumericLiteralParser::checkSeparator(SourceLocation TokLoc,
   } else if (Pos == ThisTokEnd)
     return;
 
-  if (isDigitSeparator(*Pos))
+  if (isDigitSeparator(*Pos)) {
     PP.Diag(PP.AdvanceToTokenCharacter(TokLoc, Pos - ThisTokBegin),
             diag::err_digit_separator_not_between_digits)
       << IsAfterDigits;
+    hadError = true;
+  }
 }
 
 /// ParseNumberStartingWithZero - This method is called when the first character
@@ -831,12 +844,14 @@ void NumericLiteralParser::ParseNumberStartingWithZero(SourceLocation TokLoc) {
       const char *Exponent = s;
       s++;
       saw_exponent = true;
-      if (*s == '+' || *s == '-')  s++; // sign
+      if (s != ThisTokEnd && (*s == '+' || *s == '-'))  s++; // sign
       const char *first_non_digit = SkipDigits(s);
       if (!containsDigits(s, first_non_digit)) {
-        PP.Diag(PP.AdvanceToTokenCharacter(TokLoc, Exponent-ThisTokBegin),
-                diag::err_exponent_has_no_digits);
-        hadError = true;
+        if (!hadError) {
+          PP.Diag(PP.AdvanceToTokenCharacter(TokLoc, Exponent-ThisTokBegin),
+                  diag::err_exponent_has_no_digits);
+          hadError = true;
+        }
         return;
       }
       checkSeparator(TokLoc, s, CSK_BeforeDigits);
@@ -846,7 +861,7 @@ void NumericLiteralParser::ParseNumberStartingWithZero(SourceLocation TokLoc) {
         PP.Diag(TokLoc, PP.getLangOpts().CPlusPlus
                             ? diag::ext_hex_literal_invalid
                             : diag::ext_hex_constant_invalid);
-      else if (PP.getLangOpts().CPlusPlus1z)
+      else if (PP.getLangOpts().CPlusPlus17)
         PP.Diag(TokLoc, diag::warn_cxx17_hex_literal);
     } else if (saw_period) {
       PP.Diag(PP.AdvanceToTokenCharacter(TokLoc, s - ThisTokBegin),

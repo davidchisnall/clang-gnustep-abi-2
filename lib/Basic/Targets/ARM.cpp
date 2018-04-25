@@ -28,28 +28,10 @@ void ARMTargetInfo::setABIAAPCS() {
   DoubleAlign = LongLongAlign = LongDoubleAlign = SuitableAlign = 64;
   const llvm::Triple &T = getTriple();
 
-  // size_t is unsigned long on MachO-derived environments, NetBSD, and
-  // OpenBSD.
-  if (T.isOSBinFormatMachO() || T.getOS() == llvm::Triple::NetBSD ||
-      T.getOS() == llvm::Triple::OpenBSD)
-    SizeType = UnsignedLong;
-  else
-    SizeType = UnsignedInt;
-
-  switch (T.getOS()) {
-  case llvm::Triple::NetBSD:
-  case llvm::Triple::OpenBSD:
-    WCharType = SignedInt;
-    break;
-  case llvm::Triple::Win32:
-    WCharType = UnsignedShort;
-    break;
-  case llvm::Triple::Linux:
-  default:
-    // AAPCS 7.1.1, ARM-Linux ABI 2.4: type of wchar_t is unsigned int.
+  bool IsNetBSD = T.getOS() == llvm::Triple::NetBSD;
+  bool IsOpenBSD = T.getOS() == llvm::Triple::OpenBSD;
+  if (!T.isOSWindows() && !IsNetBSD && !IsOpenBSD)
     WCharType = UnsignedInt;
-    break;
-  }
 
   UseBitFieldTypeAlignment = true;
 
@@ -93,13 +75,6 @@ void ARMTargetInfo::setABIAPCS(bool IsAAPCS16) {
   else
     DoubleAlign = LongLongAlign = LongDoubleAlign = SuitableAlign = 32;
 
-  // size_t is unsigned int on FreeBSD.
-  if (T.getOS() == llvm::Triple::FreeBSD)
-    SizeType = UnsignedInt;
-  else
-    SizeType = UnsignedLong;
-
-  // Revert to using SignedInt on apcs-gnu to comply with existing behaviour.
   WCharType = SignedInt;
 
   // Do not respect the alignment of bit-field types when laying out
@@ -236,16 +211,27 @@ ARMTargetInfo::ARMTargetInfo(const llvm::Triple &Triple,
                              const TargetOptions &Opts)
     : TargetInfo(Triple), FPMath(FP_Default), IsAAPCS(true), LDREX(0),
       HW_FP(0) {
+  bool IsOpenBSD = Triple.getOS() == llvm::Triple::OpenBSD;
+  bool IsNetBSD = Triple.getOS() == llvm::Triple::NetBSD;
 
-  switch (getTriple().getOS()) {
-  case llvm::Triple::NetBSD:
-  case llvm::Triple::OpenBSD:
-    PtrDiffType = SignedLong;
-    break;
-  default:
+  // FIXME: the isOSBinFormatMachO is a workaround for identifying a Darwin-like
+  // environment where size_t is `unsigned long` rather than `unsigned int`
+
+  PtrDiffType = IntPtrType =
+      (Triple.isOSDarwin() || Triple.isOSBinFormatMachO() || IsOpenBSD ||
+       IsNetBSD)
+          ? SignedLong
+          : SignedInt;
+
+  SizeType = (Triple.isOSDarwin() || Triple.isOSBinFormatMachO() || IsOpenBSD ||
+              IsNetBSD)
+                 ? UnsignedLong
+                 : UnsignedInt;
+
+  // ptrdiff_t is inconsistent on Darwin
+  if ((Triple.isOSDarwin() || Triple.isOSBinFormatMachO()) &&
+      !Triple.isWatchABI())
     PtrDiffType = SignedInt;
-    break;
-  }
 
   // Cache arch related info.
   setArchInfo();
@@ -348,8 +334,19 @@ bool ARMTargetInfo::initFeatureMap(
     llvm::StringMap<bool> &Features, DiagnosticsEngine &Diags, StringRef CPU,
     const std::vector<std::string> &FeaturesVec) const {
 
+  std::string ArchFeature;
   std::vector<StringRef> TargetFeatures;
   llvm::ARM::ArchKind Arch = llvm::ARM::parseArch(getTriple().getArchName());
+
+  // Map the base architecture to an appropriate target feature, so we don't
+  // rely on the target triple.
+  llvm::ARM::ArchKind CPUArch = llvm::ARM::parseCPUArch(CPU);
+  if (CPUArch == llvm::ARM::ArchKind::INVALID)
+    CPUArch = Arch;
+  if (CPUArch != llvm::ARM::ArchKind::INVALID) {
+    ArchFeature = ("+" + llvm::ARM::getArchName(CPUArch)).str();
+    TargetFeatures.push_back(ArchFeature);
+  }
 
   // get default FPU features
   unsigned FPUKind = llvm::ARM::getDefaultFPU(CPU, Arch);
@@ -433,6 +430,8 @@ bool ARMTargetInfo::handleTargetFeatures(std::vector<std::string> &Features,
       Unaligned = 0;
     } else if (Feature == "+fp16") {
       HW_FP |= HW_FP_HP;
+    } else if (Feature == "+fullfp16") {
+      HasLegalHalfType = true;
     }
   }
   HW_FP &= ~HW_FP_remove;
@@ -490,6 +489,10 @@ bool ARMTargetInfo::hasFeature(StringRef Feature) const {
 bool ARMTargetInfo::isValidCPUName(StringRef Name) const {
   return Name == "generic" ||
          llvm::ARM::parseCPUArch(Name) != llvm::ARM::ArchKind::INVALID;
+}
+
+void ARMTargetInfo::fillValidCPUList(SmallVectorImpl<StringRef> &Values) const {
+  llvm::ARM::fillValidCPUArchList(Values);
 }
 
 bool ARMTargetInfo::setCPU(const std::string &Name) {
@@ -596,7 +599,7 @@ void ARMTargetInfo::getTargetDefines(const LangOptions &Opts,
 
   // ACLE 6.4.4 LDREX/STREX
   if (LDREX)
-    Builder.defineMacro("__ARM_FEATURE_LDREX", "0x" + llvm::utohexstr(LDREX));
+    Builder.defineMacro("__ARM_FEATURE_LDREX", "0x" + Twine::utohexstr(LDREX));
 
   // ACLE 6.4.5 CLZ
   if (ArchVersion == 5 || (ArchVersion == 6 && CPUProfile != "M") ||
@@ -605,7 +608,7 @@ void ARMTargetInfo::getTargetDefines(const LangOptions &Opts,
 
   // ACLE 6.5.1 Hardware Floating Point
   if (HW_FP)
-    Builder.defineMacro("__ARM_FP", "0x" + llvm::utohexstr(HW_FP));
+    Builder.defineMacro("__ARM_FP", "0x" + Twine::utohexstr(HW_FP));
 
   // ACLE predefines.
   Builder.defineMacro("__ARM_ACLE", "200");
@@ -686,10 +689,11 @@ void ARMTargetInfo::getTargetDefines(const LangOptions &Opts,
     // current AArch32 NEON implementations do not support double-precision
     // floating-point even when it is present in VFP.
     Builder.defineMacro("__ARM_NEON_FP",
-                        "0x" + llvm::utohexstr(HW_FP & ~HW_FP_DP));
+                        "0x" + Twine::utohexstr(HW_FP & ~HW_FP_DP));
   }
 
-  Builder.defineMacro("__ARM_SIZEOF_WCHAR_T", Opts.ShortWChar ? "2" : "4");
+  Builder.defineMacro("__ARM_SIZEOF_WCHAR_T",
+                      Twine(Opts.WCharSize ? Opts.WCharSize : 4));
 
   Builder.defineMacro("__ARM_SIZEOF_MINIMAL_ENUM", Opts.ShortEnums ? "1" : "4");
 
@@ -718,6 +722,15 @@ void ARMTargetInfo::getTargetDefines(const LangOptions &Opts,
 
   if (Opts.UnsafeFPMath)
     Builder.defineMacro("__ARM_FP_FAST", "1");
+
+  // Armv8.2-A FP16 vector intrinsic
+  if ((FPU & NeonFPU) && HasLegalHalfType)
+    Builder.defineMacro("__ARM_FEATURE_FP16_VECTOR_ARITHMETIC", "1");
+
+  // Armv8.2-A FP16 scalar intrinsics
+  if (HasLegalHalfType)
+    Builder.defineMacro("__ARM_FEATURE_FP16_SCALAR_ARITHMETIC", "1");
+
 
   switch (ArchKind) {
   default:
@@ -932,8 +945,6 @@ void ARMbeTargetInfo::getTargetDefines(const LangOptions &Opts,
 WindowsARMTargetInfo::WindowsARMTargetInfo(const llvm::Triple &Triple,
                                            const TargetOptions &Opts)
     : WindowsTargetInfo<ARMleTargetInfo>(Triple, Opts), Triple(Triple) {
-  WCharType = UnsignedShort;
-  SizeType = UnsignedInt;
 }
 
 void WindowsARMTargetInfo::getVisualStudioDefines(const LangOptions &Opts,
@@ -971,6 +982,8 @@ WindowsARMTargetInfo::checkCallingConvention(CallingConv CC) const {
     return CCCR_Ignore;
   case CC_C:
   case CC_OpenCLKernel:
+  case CC_PreserveMost:
+  case CC_PreserveAll:
     return CCCR_OK;
   default:
     return CCCR_Warning;
@@ -1014,17 +1027,14 @@ MinGWARMTargetInfo::MinGWARMTargetInfo(const llvm::Triple &Triple,
 void MinGWARMTargetInfo::getTargetDefines(const LangOptions &Opts,
                                           MacroBuilder &Builder) const {
   WindowsARMTargetInfo::getTargetDefines(Opts, Builder);
-  DefineStd(Builder, "WIN32", Opts);
-  DefineStd(Builder, "WINNT", Opts);
   Builder.defineMacro("_ARM_");
-  addMinGWDefines(Opts, Builder);
 }
 
 CygwinARMTargetInfo::CygwinARMTargetInfo(const llvm::Triple &Triple,
                                          const TargetOptions &Opts)
     : ARMleTargetInfo(Triple, Opts) {
+  this->WCharType = TargetInfo::UnsignedShort;
   TLSSupported = false;
-  WCharType = UnsignedShort;
   DoubleAlign = LongLongAlign = 64;
   resetDataLayout("e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64");
 }
@@ -1052,10 +1062,6 @@ DarwinARMTargetInfo::DarwinARMTargetInfo(const llvm::Triple &Triple,
   if (Triple.isWatchABI()) {
     // Darwin on iOS uses a variant of the ARM C++ ABI.
     TheCXXABI.set(TargetCXXABI::WatchOS);
-
-    // The 32-bit ABI is silent on what ptrdiff_t should be, but given that
-    // size_t is long, it's a bit weird for it to be int.
-    PtrDiffType = SignedLong;
 
     // BOOL should be a real boolean on the new ABI
     UseSignedCharForObjCBool = false;

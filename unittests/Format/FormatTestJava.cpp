@@ -46,6 +46,7 @@ protected:
   static void verifyFormat(
       llvm::StringRef Code,
       const FormatStyle &Style = getGoogleStyle(FormatStyle::LK_Java)) {
+    EXPECT_EQ(Code.str(), format(Code, Style)) << "Expected code is not stable";
     EXPECT_EQ(Code.str(), format(test::messUp(Code), Style));
   }
 };
@@ -144,6 +145,7 @@ TEST_F(FormatTestJava, ClassDeclarations) {
   verifyFormat("public interface SomeInterface {\n"
                "  void doStuff(int theStuff);\n"
                "  void doMoreStuff(int moreStuff);\n"
+               "  default void doStuffWithDefault() {}\n"
                "}");
   verifyFormat("@interface SomeInterface {\n"
                "  void doStuff(int theStuff);\n"
@@ -333,6 +335,11 @@ TEST_F(FormatTestJava, Generics) {
   verifyFormat("Iterable<? extends SomeObject> a;");
 
   verifyFormat("A.<B>doSomething();");
+  verifyFormat("A.<B<C>>doSomething();");
+  verifyFormat("A.<B<C<D>>>doSomething();");
+  verifyFormat("A.<B<C<D<E>>>>doSomething();");
+
+  verifyFormat("OrderedPair<String, List<Box<Integer>>> p = null;");
 
   verifyFormat("@Override\n"
                "public Map<String, ?> getAll() {}");
@@ -412,6 +419,7 @@ TEST_F(FormatTestJava, SynchronizedKeyword) {
 
 TEST_F(FormatTestJava, AssertKeyword) {
   verifyFormat("assert a && b;");
+  verifyFormat("assert (a && b);");
 }
 
 TEST_F(FormatTestJava, PackageDeclarations) {

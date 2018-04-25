@@ -16,7 +16,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Serialization/ASTDeserializationListener.h"
-#include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/DJB.h"
 
 using namespace clang;
 
@@ -90,6 +90,9 @@ serialization::TypeIdxFromBuiltin(const BuiltinType *BT) {
     break;
   case BuiltinType::LongDouble:
     ID = PREDEF_TYPE_LONGDOUBLE_ID;
+    break;
+  case BuiltinType::Float16:
+    ID = PREDEF_TYPE_FLOAT16_ID;
     break;
   case BuiltinType::Float128:
     ID = PREDEF_TYPE_FLOAT128_ID;
@@ -168,7 +171,7 @@ unsigned serialization::ComputeHash(Selector Sel) {
   unsigned R = 5381;
   for (unsigned I = 0; I != N; ++I)
     if (IdentifierInfo *II = Sel.getIdentifierInfoForSlot(I))
-      R = llvm::HashString(II->getName(), R);
+      R = llvm::djbHash(II->getName(), R);
   return R;
 }
 
@@ -228,7 +231,7 @@ serialization::getDefinitiveDeclContext(const DeclContext *DC) {
   default:
     llvm_unreachable("Unhandled DeclContext in AST reader");
   }
-  
+
   llvm_unreachable("Unhandled decl kind");
 }
 
@@ -310,6 +313,7 @@ bool serialization::isRedeclarableDeclKind(unsigned Kind) {
   case Decl::BuiltinTemplate:
   case Decl::Decomposition:
   case Decl::Binding:
+  case Decl::Concept:
     return false;
 
   // These indirectly derive from Redeclarable<T> but are not actually

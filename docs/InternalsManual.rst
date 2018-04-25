@@ -1540,7 +1540,7 @@ Implementation Approach
 After trying several different approaches, we've finally converged on a design
 (Note, at the time of this writing, not all of this has been implemented,
 consider this a design goal!).  Our basic approach is to define a single
-recursive method evaluation method (``Expr::Evaluate``), which is implemented
+recursive evaluation method (``Expr::Evaluate``), which is implemented
 in ``AST/ExprConstant.cpp``.  Given an expression with "scalar" type (integer,
 fp, complex, or pointer) this method returns the following information:
 
@@ -1823,7 +1823,7 @@ Note that setting this member to 1 will opt out of common attribute semantic
 handling, requiring extra implementation efforts to ensure the attribute
 appertains to the appropriate subject, etc.
 
-If the attribute should not be propagated from from a template declaration to an
+If the attribute should not be propagated from a template declaration to an
 instantiation of the template, set the ``Clone`` member to 0. By default, all
 attributes will be cloned to template instantiations.
 
@@ -2037,7 +2037,7 @@ are similar.
    * ``CodeGenFunction`` contains functions ``ConvertType`` and
      ``ConvertTypeForMem`` that convert Clang's types (``clang::Type*`` or
      ``clang::QualType``) to LLVM types.  Use the former for values, and the
-     later for memory locations: test with the C++ "``bool``" type to check
+     latter for memory locations: test with the C++ "``bool``" type to check
      this.  If you find that you are having to use LLVM bitcasts to make the
      subexpressions of your expression have the type that your expression
      expects, STOP!  Go fix semantic analysis and the AST so that you don't

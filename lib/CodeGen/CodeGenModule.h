@@ -324,6 +324,10 @@ private:
   /// is defined once we get to the end of the of the translation unit.
   std::vector<GlobalDecl> Aliases;
 
+  /// List of multiversion functions that have to be emitted.  Used to make sure
+  /// we properly emit the iFunc.
+  std::vector<GlobalDecl> MultiVersionFuncs;
+
   typedef llvm::StringMap<llvm::TrackingVH<llvm::Constant> > ReplacementsTy;
   ReplacementsTy Replacements;
 
@@ -490,14 +494,16 @@ private:
 
   /// @}
 
-  llvm::DenseMap<const Decl *, bool> DeferredEmptyCoverageMappingDecls;
+  llvm::MapVector<const Decl *, bool> DeferredEmptyCoverageMappingDecls;
 
   std::unique_ptr<CoverageMappingModuleGen> CoverageMapping;
 
   /// Mapping from canonical types to their metadata identifiers. We need to
   /// maintain this mapping because identifiers may be formed from distinct
   /// MDNodes.
-  llvm::DenseMap<QualType, llvm::Metadata *> MetadataIdMap;
+  typedef llvm::DenseMap<QualType, llvm::Metadata *> MetadataTypeMap;
+  MetadataTypeMap MetadataIdMap;
+  MetadataTypeMap GeneralizedMetadataIdMap;
 
 public:
   CodeGenModule(ASTContext &C, const HeaderSearchOptions &headersearchopts,
@@ -512,6 +518,9 @@ public:
 
   /// Finalize LLVM code generation.
   void Release();
+
+  /// Return true if we should emit location information for expressions.
+  bool getExpressionLocationsEnabled() const;
 
   /// Return a reference to the configured Objective-C runtime.
   CGObjCRuntime &getObjCRuntime() {
@@ -649,25 +658,58 @@ public:
   CtorList &getGlobalCtors() { return GlobalCtors; }
   CtorList &getGlobalDtors() { return GlobalDtors; }
 
-  llvm::MDNode *getTBAAInfo(QualType QTy);
-  llvm::MDNode *getTBAAInfoForVTablePtr();
+  /// getTBAATypeInfo - Get metadata used to describe accesses to objects of
+  /// the given type.
+  llvm::MDNode *getTBAATypeInfo(QualType QTy);
+
+  /// getTBAAAccessInfo - Get TBAA information that describes an access to
+  /// an object of the given type.
+  TBAAAccessInfo getTBAAAccessInfo(QualType AccessType);
+
+  /// getTBAAVTablePtrAccessInfo - Get the TBAA information that describes an
+  /// access to a virtual table pointer.
+  TBAAAccessInfo getTBAAVTablePtrAccessInfo(llvm::Type *VTablePtrType);
+
   llvm::MDNode *getTBAAStructInfo(QualType QTy);
-  /// Return the path-aware tag for given base type, access node and offset.
-  llvm::MDNode *getTBAAStructTagInfo(QualType BaseTy, llvm::MDNode *AccessN,
-                                     uint64_t O);
+
+  /// getTBAABaseTypeInfo - Get metadata that describes the given base access
+  /// type. Return null if the type is not suitable for use in TBAA access tags.
+  llvm::MDNode *getTBAABaseTypeInfo(QualType QTy);
+
+  /// getTBAAAccessTagInfo - Get TBAA tag for a given memory access.
+  llvm::MDNode *getTBAAAccessTagInfo(TBAAAccessInfo Info);
+
+  /// mergeTBAAInfoForCast - Get merged TBAA information for the purposes of
+  /// type casts.
+  TBAAAccessInfo mergeTBAAInfoForCast(TBAAAccessInfo SourceInfo,
+                                      TBAAAccessInfo TargetInfo);
+
+  /// mergeTBAAInfoForConditionalOperator - Get merged TBAA information for the
+  /// purposes of conditional operator.
+  TBAAAccessInfo mergeTBAAInfoForConditionalOperator(TBAAAccessInfo InfoA,
+                                                     TBAAAccessInfo InfoB);
+
+  /// mergeTBAAInfoForMemoryTransfer - Get merged TBAA information for the
+  /// purposes of memory transfer calls.
+  TBAAAccessInfo mergeTBAAInfoForMemoryTransfer(TBAAAccessInfo DestInfo,
+                                                TBAAAccessInfo SrcInfo);
+
+  /// getTBAAInfoForSubobject - Get TBAA information for an access with a given
+  /// base lvalue.
+  TBAAAccessInfo getTBAAInfoForSubobject(LValue Base, QualType AccessType) {
+    if (Base.getTBAAInfo().isMayAlias())
+      return TBAAAccessInfo::getMayAliasInfo();
+    return getTBAAAccessInfo(AccessType);
+  }
 
   bool isTypeConstant(QualType QTy, bool ExcludeCtorDtor);
 
   bool isPaddedAtomicType(QualType type);
   bool isPaddedAtomicType(const AtomicType *type);
 
-  /// Decorate the instruction with a TBAA tag. For scalar TBAA, the tag
-  /// is the same as the type. For struct-path aware TBAA, the tag
-  /// is different from the type: base type, access type and offset.
-  /// When ConvertTypeToTag is true, we create a tag based on the scalar type.
+  /// DecorateInstructionWithTBAA - Decorate the instruction with a TBAA tag.
   void DecorateInstructionWithTBAA(llvm::Instruction *Inst,
-                                   llvm::MDNode *TBAAInfo,
-                                   bool ConvertTypeToTag = true);
+                                   TBAAAccessInfo TBAAInfo);
 
   /// Adds !invariant.barrier !tag to instruction
   void DecorateInstructionWithInvariantGroup(llvm::Instruction *I,
@@ -678,6 +720,18 @@ public:
 
   /// Set the visibility for the given LLVM GlobalValue.
   void setGlobalVisibility(llvm::GlobalValue *GV, const NamedDecl *D) const;
+
+  void setGlobalVisibilityAndLocal(llvm::GlobalValue *GV,
+                                   const NamedDecl *D) const;
+
+  void setDSOLocal(llvm::GlobalValue *GV) const;
+
+  void setDLLImportDLLExport(llvm::GlobalValue *GV, GlobalDecl D) const;
+  void setDLLImportDLLExport(llvm::GlobalValue *GV, const NamedDecl *D) const;
+  /// Set visibility, dllimport/dllexport and dso_local.
+  /// This must be called after dllimport/dllexport is set.
+  void setGVProperties(llvm::GlobalValue *GV, GlobalDecl GD) const;
+  void setGVProperties(llvm::GlobalValue *GV, const NamedDecl *D) const;
 
   /// Set the TLS mode for the given LLVM GlobalValue for the thread-local
   /// variable declaration D.
@@ -718,12 +772,12 @@ public:
   ///
   /// For languages without explicit address spaces, if D has default address
   /// space, target-specific global or constant address space may be returned.
-  unsigned GetGlobalVarAddressSpace(const VarDecl *D);
+  LangAS GetGlobalVarAddressSpace(const VarDecl *D);
 
   /// Return the llvm::Constant for the address of the given global variable.
   /// If Ty is non-null and if the global doesn't exist, then it will be created
   /// with the specified type instead of whatever the normal requested type
-  /// would be. If IsForDefinition is true, it is guranteed that an actual
+  /// would be. If IsForDefinition is true, it is guaranteed that an actual
   /// global with type Ty will be returned, not conversion of a variable with
   /// the same mangled name but some other type.
   llvm::Constant *GetAddrOfGlobalVar(const VarDecl *D,
@@ -746,7 +800,8 @@ public:
   ConstantAddress GetAddrOfUuidDescriptor(const CXXUuidofExpr* E);
 
   /// Get the address of the thunk for the given global decl.
-  llvm::Constant *GetAddrOfThunk(GlobalDecl GD, const ThunkInfo &Thunk);
+  llvm::Constant *GetAddrOfThunk(StringRef Name, llvm::Type *FnTy,
+                                 GlobalDecl GD);
 
   /// Get a reference to the target of VD.
   ConstantAddress GetWeakRefReference(const ValueDecl *VD);
@@ -968,7 +1023,7 @@ public:
   /// Set the attributes on the LLVM function for the given decl and function
   /// info. This applies attributes necessary for handling the ABI as well as
   /// user specified attributes like section.
-  void SetInternalFunctionAttributes(const Decl *D, llvm::Function *F,
+  void SetInternalFunctionAttributes(GlobalDecl GD, llvm::Function *F,
                                      const CGFunctionInfo &FI);
 
   /// Set the LLVM function attributes (sext, zext, etc).
@@ -1051,14 +1106,13 @@ public:
   /// value.
   void AddDependentLib(StringRef Lib);
 
+  void AddELFLibDirective(StringRef Lib);
+
   llvm::GlobalVariable::LinkageTypes getFunctionLinkage(GlobalDecl GD);
 
   void setFunctionLinkage(GlobalDecl GD, llvm::Function *F) {
     F->setLinkage(getFunctionLinkage(GD));
   }
-
-  /// Set the DLL storage class on F.
-  void setFunctionDLLStorageClass(GlobalDecl GD, llvm::Function *F);
 
   /// Return the appropriate linkage for the vtable, VTT, and type information
   /// of the given class.
@@ -1103,7 +1157,8 @@ public:
   /// annotations are emitted during finalization of the LLVM code.
   void AddGlobalAnnotations(const ValueDecl *D, llvm::GlobalValue *GV);
 
-  bool isInSanitizerBlacklist(llvm::Function *Fn, SourceLocation Loc) const;
+  bool isInSanitizerBlacklist(SanitizerMask Kind, llvm::Function *Fn,
+                              SourceLocation Loc) const;
 
   bool isInSanitizerBlacklist(llvm::GlobalVariable *GV, SourceLocation Loc,
                               QualType Ty,
@@ -1123,17 +1178,12 @@ public:
     DeferredVTables.push_back(RD);
   }
 
-  /// Emit code for a singal global function or var decl. Forward declarations
+  /// Emit code for a single global function or var decl. Forward declarations
   /// are emitted lazily.
   void EmitGlobal(GlobalDecl D);
 
-  bool TryEmitDefinitionAsAlias(GlobalDecl Alias, GlobalDecl Target,
-                                bool InEveryTU);
+  bool TryEmitDefinitionAsAlias(GlobalDecl Alias, GlobalDecl Target);
   bool TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D);
-
-  /// Set attributes for a global definition.
-  void setFunctionDefinitionAttributes(const FunctionDecl *D,
-                                       llvm::Function *F);
 
   llvm::GlobalValue *GetGlobalValue(StringRef Ref);
 
@@ -1141,13 +1191,7 @@ public:
   /// Objective-C method, function, global variable).
   ///
   /// NOTE: This should only be called for definitions.
-  void SetCommonAttributes(const Decl *D, llvm::GlobalValue *GV);
-
-  /// Set attributes which must be preserved by an alias. This includes common
-  /// attributes (i.e. it includes a call to SetCommonAttributes).
-  ///
-  /// NOTE: This should only be called for definitions.
-  void setAliasAttributes(const Decl *D, llvm::GlobalValue *GV);
+  void SetCommonAttributes(GlobalDecl GD, llvm::GlobalValue *GV);
 
   void addReplacement(StringRef Name, llvm::Constant *C);
 
@@ -1177,6 +1221,11 @@ public:
   /// MDString (for external identifiers) or a distinct unnamed MDNode (for
   /// internal identifiers).
   llvm::Metadata *CreateMetadataIdentifierForType(QualType T);
+
+  /// Create a metadata identifier for the generalization of the given type.
+  /// This may either be an MDString (for external identifiers) or a distinct
+  /// unnamed MDNode (for internal identifiers).
+  llvm::Metadata *CreateMetadataIdentifierGeneralized(QualType T);
 
   /// Create and attach type metadata to the given function.
   void CreateFunctionTypeMetadata(const FunctionDecl *FD, llvm::Function *F);
@@ -1208,18 +1257,25 @@ private:
       llvm::AttributeList ExtraAttrs = llvm::AttributeList(),
       ForDefinition_t IsForDefinition = NotForDefinition);
 
+  llvm::Constant *GetOrCreateMultiVersionIFunc(GlobalDecl GD,
+                                               llvm::Type *DeclTy,
+                                               StringRef MangledName,
+                                               const FunctionDecl *FD);
+  void UpdateMultiVersionNames(GlobalDecl GD, const FunctionDecl *FD);
+
   llvm::Constant *GetOrCreateLLVMGlobal(StringRef MangledName,
                                         llvm::PointerType *PTy,
                                         const VarDecl *D,
                                         ForDefinition_t IsForDefinition
                                           = NotForDefinition);
 
-  void setNonAliasAttributes(const Decl *D, llvm::GlobalObject *GO);
+  bool GetCPUAndFeaturesAttributes(const Decl *D,
+                                   llvm::AttrBuilder &AttrBuilder);
+  void setNonAliasAttributes(GlobalDecl GD, llvm::GlobalObject *GO);
 
   /// Set function attributes for a function declaration.
   void SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
-                             bool IsIncompleteFunction, bool IsThunk,
-                             ForDefinition_t IsForDefinition);
+                             bool IsIncompleteFunction, bool IsThunk);
 
   void EmitGlobalDefinition(GlobalDecl D, llvm::GlobalValue *GV = nullptr);
 
@@ -1279,6 +1335,14 @@ private:
   void applyGlobalValReplacements();
 
   void checkAliases();
+
+  std::map<int, llvm::TinyPtrVector<llvm::Function *>> DtorsUsingAtExit;
+
+  /// Register functions annotated with __attribute__((destructor)) using
+  /// __cxa_atexit, if it is available, or atexit otherwise.
+  void registerGlobalDtorsWithAtExit();
+
+  void emitMultiVersionFunctions();
 
   /// Emit any vtables which we deferred and still have a use for.
   void EmitDeferredVTables();

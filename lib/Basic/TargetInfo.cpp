@@ -12,17 +12,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Basic/TargetInfo.h"
-#include "clang/AST/Type.h"
 #include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/LangOptions.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/TargetParser.h"
 #include <cstdlib>
 using namespace clang;
 
-static const LangAS::Map DefaultAddrSpaceMap = { 0 };
+static const LangASMap DefaultAddrSpaceMap = {0};
 
 // TargetInfo Constructor.
 TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
@@ -30,7 +30,9 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   // SPARC.  These should be overridden by concrete targets as needed.
   BigEndian = !T.isLittleEndian();
   TLSSupported = true;
+  VLASupported = true;
   NoAsmVariants = false;
+  HasLegalHalfType = false;
   HasFloat128 = false;
   PointerWidth = PointerAlign = 32;
   BoolWidth = BoolAlign = 8;
@@ -43,7 +45,7 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   // From the glibc documentation, on GNU systems, malloc guarantees 16-byte
   // alignment on 64-bit systems and 8-byte alignment on 32-bit systems. See
   // https://www.gnu.org/software/libc/manual/html_node/Malloc-Examples.html
-  if (T.isGNUEnvironment())
+  if (T.isGNUEnvironment() || T.isWindowsMSVCEnvironment())
     NewAlign = Triple.isArch64Bit() ? 128 : Triple.isArch32Bit() ? 64 : 0;
   else
     NewAlign = 0; // Infer from basic type alignment.
@@ -290,8 +292,15 @@ bool TargetInfo::isTypeSigned(IntType T) {
 void TargetInfo::adjust(LangOptions &Opts) {
   if (Opts.NoBitFieldTypeAlign)
     UseBitFieldTypeAlignment = false;
-  if (Opts.ShortWChar)
-    WCharType = UnsignedShort;
+
+  switch (Opts.WCharSize) {
+  default: llvm_unreachable("invalid wchar_t width");
+  case 0: break;
+  case 1: WCharType = Opts.WCharIsSigned ? SignedChar : UnsignedChar; break;
+  case 2: WCharType = Opts.WCharIsSigned ? SignedShort : UnsignedShort; break;
+  case 4: WCharType = Opts.WCharIsSigned ? SignedInt : UnsignedInt; break;
+  }
+
   if (Opts.AlignDouble) {
     DoubleAlign = LongLongAlign = 64;
     LongDoubleAlign = 64;
@@ -348,23 +357,21 @@ bool TargetInfo::initFeatureMap(
   return true;
 }
 
-LangAS::ID TargetInfo::getOpenCLTypeAddrSpace(const Type *T) const {
-  auto BT = dyn_cast<BuiltinType>(T);
+TargetInfo::CallingConvKind
+TargetInfo::getCallingConvKind(bool ClangABICompat4) const {
+  if (getCXXABI() != TargetCXXABI::Microsoft &&
+      (ClangABICompat4 || getTriple().getOS() == llvm::Triple::PS4))
+    return CCK_ClangABI4OrPS4;
+  return CCK_Default;
+}
 
-  if (!BT) {
-    if (isa<PipeType>(T))
-      return LangAS::opencl_global;
-
-    return LangAS::Default;
-  }
-
-  switch (BT->getKind()) {
-#define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix)                   \
-  case BuiltinType::Id:                                                        \
+LangAS TargetInfo::getOpenCLTypeAddrSpace(OpenCLTypeKind TK) const {
+  switch (TK) {
+  case OCLTK_Image:
+  case OCLTK_Pipe:
     return LangAS::opencl_global;
-#include "clang/Basic/OpenCLImageTypes.def"
 
-  case BuiltinType::OCLSampler:
+  case OCLTK_Sampler:
     return LangAS::opencl_constant;
 
   default:

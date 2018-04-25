@@ -16,6 +16,7 @@
 #include "clang/Format/Format.h"
 #include "AffectedRangeManager.h"
 #include "ContinuationIndenter.h"
+#include "FormatInternal.h"
 #include "FormatTokenLexer.h"
 #include "NamespaceEndCommentsFixer.h"
 #include "SortJavaScriptImports.h"
@@ -31,6 +32,7 @@
 #include "clang/Basic/VirtualFileSystem.h"
 #include "clang/Lex/Lexer.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Path.h"
@@ -45,6 +47,7 @@
 using clang::format::FormatStyle;
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(clang::format::FormatStyle::IncludeCategory)
+LLVM_YAML_IS_SEQUENCE_VECTOR(clang::format::FormatStyle::RawStringFormat)
 
 namespace llvm {
 namespace yaml {
@@ -102,6 +105,14 @@ template <> struct ScalarEnumerationTraits<FormatStyle::ShortFunctionStyle> {
   }
 };
 
+template <> struct ScalarEnumerationTraits<FormatStyle::BinPackStyle> {
+  static void enumeration(IO &IO, FormatStyle::BinPackStyle &Value) {
+    IO.enumCase(Value, "Auto", FormatStyle::BPS_Auto);
+    IO.enumCase(Value, "Always", FormatStyle::BPS_Always);
+    IO.enumCase(Value, "Never", FormatStyle::BPS_Never);
+  }
+};
+
 template <> struct ScalarEnumerationTraits<FormatStyle::BinaryOperatorStyle> {
   static void enumeration(IO &IO, FormatStyle::BinaryOperatorStyle &Value) {
     IO.enumCase(Value, "All", FormatStyle::BOS_All);
@@ -125,8 +136,10 @@ template <> struct ScalarEnumerationTraits<FormatStyle::BraceBreakingStyle> {
   }
 };
 
-template <> struct ScalarEnumerationTraits<FormatStyle::BreakConstructorInitializersStyle> {
-  static void enumeration(IO &IO, FormatStyle::BreakConstructorInitializersStyle &Value) {
+template <>
+struct ScalarEnumerationTraits<FormatStyle::BreakConstructorInitializersStyle> {
+  static void
+  enumeration(IO &IO, FormatStyle::BreakConstructorInitializersStyle &Value) {
     IO.enumCase(Value, "BeforeColon", FormatStyle::BCIS_BeforeColon);
     IO.enumCase(Value, "BeforeComma", FormatStyle::BCIS_BeforeComma);
     IO.enumCase(Value, "AfterColon", FormatStyle::BCIS_AfterColon);
@@ -189,8 +202,10 @@ template <> struct ScalarEnumerationTraits<FormatStyle::BracketAlignmentStyle> {
   }
 };
 
-template <> struct ScalarEnumerationTraits<FormatStyle::EscapedNewlineAlignmentStyle> {
-  static void enumeration(IO &IO, FormatStyle::EscapedNewlineAlignmentStyle &Value) {
+template <>
+struct ScalarEnumerationTraits<FormatStyle::EscapedNewlineAlignmentStyle> {
+  static void enumeration(IO &IO,
+                          FormatStyle::EscapedNewlineAlignmentStyle &Value) {
     IO.enumCase(Value, "DontAlign", FormatStyle::ENAS_DontAlign);
     IO.enumCase(Value, "Left", FormatStyle::ENAS_Left);
     IO.enumCase(Value, "Right", FormatStyle::ENAS_Right);
@@ -355,6 +370,7 @@ template <> struct MappingTraits<FormatStyle> {
                    Style.ExperimentalAutoDetectBinPacking);
     IO.mapOptional("FixNamespaceComments", Style.FixNamespaceComments);
     IO.mapOptional("ForEachMacros", Style.ForEachMacros);
+    IO.mapOptional("IncludeBlocks", Style.IncludeBlocks);
     IO.mapOptional("IncludeCategories", Style.IncludeCategories);
     IO.mapOptional("IncludeIsMainRegex", Style.IncludeIsMainRegex);
     IO.mapOptional("IndentCaseLabels", Style.IndentCaseLabels);
@@ -370,12 +386,12 @@ template <> struct MappingTraits<FormatStyle> {
     IO.mapOptional("MacroBlockEnd", Style.MacroBlockEnd);
     IO.mapOptional("MaxEmptyLinesToKeep", Style.MaxEmptyLinesToKeep);
     IO.mapOptional("NamespaceIndentation", Style.NamespaceIndentation);
+    IO.mapOptional("ObjCBinPackProtocolList", Style.ObjCBinPackProtocolList);
     IO.mapOptional("ObjCBlockIndentWidth", Style.ObjCBlockIndentWidth);
     IO.mapOptional("ObjCSpaceAfterProperty", Style.ObjCSpaceAfterProperty);
     IO.mapOptional("ObjCSpaceBeforeProtocolList",
                    Style.ObjCSpaceBeforeProtocolList);
-    IO.mapOptional("PenaltyBreakAssignment",
-                   Style.PenaltyBreakAssignment);
+    IO.mapOptional("PenaltyBreakAssignment", Style.PenaltyBreakAssignment);
     IO.mapOptional("PenaltyBreakBeforeFirstCallParameter",
                    Style.PenaltyBreakBeforeFirstCallParameter);
     IO.mapOptional("PenaltyBreakComment", Style.PenaltyBreakComment);
@@ -386,14 +402,22 @@ template <> struct MappingTraits<FormatStyle> {
     IO.mapOptional("PenaltyReturnTypeOnItsOwnLine",
                    Style.PenaltyReturnTypeOnItsOwnLine);
     IO.mapOptional("PointerAlignment", Style.PointerAlignment);
+    IO.mapOptional("RawStringFormats", Style.RawStringFormats);
     IO.mapOptional("ReflowComments", Style.ReflowComments);
     IO.mapOptional("SortIncludes", Style.SortIncludes);
     IO.mapOptional("SortUsingDeclarations", Style.SortUsingDeclarations);
     IO.mapOptional("SpaceAfterCStyleCast", Style.SpaceAfterCStyleCast);
-    IO.mapOptional("SpaceAfterTemplateKeyword", Style.SpaceAfterTemplateKeyword);
+    IO.mapOptional("SpaceAfterTemplateKeyword",
+                   Style.SpaceAfterTemplateKeyword);
     IO.mapOptional("SpaceBeforeAssignmentOperators",
                    Style.SpaceBeforeAssignmentOperators);
+    IO.mapOptional("SpaceBeforeCtorInitializerColon",
+                   Style.SpaceBeforeCtorInitializerColon);
+    IO.mapOptional("SpaceBeforeInheritanceColon",
+                   Style.SpaceBeforeInheritanceColon);
     IO.mapOptional("SpaceBeforeParens", Style.SpaceBeforeParens);
+    IO.mapOptional("SpaceBeforeRangeBasedForLoopColon",
+                   Style.SpaceBeforeRangeBasedForLoopColon);
     IO.mapOptional("SpaceInEmptyParentheses", Style.SpaceInEmptyParentheses);
     IO.mapOptional("SpacesBeforeTrailingComments",
                    Style.SpacesBeforeTrailingComments);
@@ -420,6 +444,7 @@ template <> struct MappingTraits<FormatStyle::BraceWrappingFlags> {
     IO.mapOptional("AfterObjCDeclaration", Wrapping.AfterObjCDeclaration);
     IO.mapOptional("AfterStruct", Wrapping.AfterStruct);
     IO.mapOptional("AfterUnion", Wrapping.AfterUnion);
+    IO.mapOptional("AfterExternBlock", Wrapping.AfterExternBlock);
     IO.mapOptional("BeforeCatch", Wrapping.BeforeCatch);
     IO.mapOptional("BeforeElse", Wrapping.BeforeElse);
     IO.mapOptional("IndentBraces", Wrapping.IndentBraces);
@@ -433,6 +458,24 @@ template <> struct MappingTraits<FormatStyle::IncludeCategory> {
   static void mapping(IO &IO, FormatStyle::IncludeCategory &Category) {
     IO.mapOptional("Regex", Category.Regex);
     IO.mapOptional("Priority", Category.Priority);
+  }
+};
+
+template <> struct ScalarEnumerationTraits<FormatStyle::IncludeBlocksStyle> {
+  static void enumeration(IO &IO, FormatStyle::IncludeBlocksStyle &Value) {
+    IO.enumCase(Value, "Preserve", FormatStyle::IBS_Preserve);
+    IO.enumCase(Value, "Merge", FormatStyle::IBS_Merge);
+    IO.enumCase(Value, "Regroup", FormatStyle::IBS_Regroup);
+  }
+};
+
+template <> struct MappingTraits<FormatStyle::RawStringFormat> {
+  static void mapping(IO &IO, FormatStyle::RawStringFormat &Format) {
+    IO.mapOptional("Language", Format.Language);
+    IO.mapOptional("Delimiters", Format.Delimiters);
+    IO.mapOptional("EnclosingFunctions", Format.EnclosingFunctions);
+    IO.mapOptional("CanonicalDelimiter", Format.CanonicalDelimiter);
+    IO.mapOptional("BasedOnStyle", Format.BasedOnStyle);
   }
 };
 
@@ -450,7 +493,7 @@ template <> struct DocumentListTraits<std::vector<FormatStyle>> {
     if (Index >= Seq.size()) {
       assert(Index == Seq.size());
       FormatStyle Template;
-      if (Seq.size() > 0 && Seq[0].Language == FormatStyle::LK_None) {
+      if (!Seq.empty() && Seq[0].Language == FormatStyle::LK_None) {
         Template = Seq[0];
       } else {
         Template = *((const FormatStyle *)IO.getContext());
@@ -468,7 +511,7 @@ namespace clang {
 namespace format {
 
 const std::error_category &getParseCategory() {
-  static ParseErrorCategory C;
+  static const ParseErrorCategory C{};
   return C;
 }
 std::error_code make_error_code(ParseError e) {
@@ -500,9 +543,9 @@ static FormatStyle expandPresets(const FormatStyle &Style) {
   if (Style.BreakBeforeBraces == FormatStyle::BS_Custom)
     return Style;
   FormatStyle Expanded = Style;
-  Expanded.BraceWrapping = {false, false, false, false, false, false,
-                            false, false, false, false, false, true,
-                            true,  true};
+  Expanded.BraceWrapping = {false, false, false, false, false,
+                            false, false, false, false, false,
+                            false, false, true,  true,  true};
   switch (Style.BreakBeforeBraces) {
   case FormatStyle::BS_Linux:
     Expanded.BraceWrapping.AfterClass = true;
@@ -515,7 +558,8 @@ static FormatStyle expandPresets(const FormatStyle &Style) {
     Expanded.BraceWrapping.AfterFunction = true;
     Expanded.BraceWrapping.AfterStruct = true;
     Expanded.BraceWrapping.AfterUnion = true;
-    Expanded.BraceWrapping.SplitEmptyFunction = false;
+    Expanded.BraceWrapping.AfterExternBlock = true;
+    Expanded.BraceWrapping.SplitEmptyFunction = true;
     Expanded.BraceWrapping.SplitEmptyRecord = false;
     break;
   case FormatStyle::BS_Stroustrup:
@@ -531,13 +575,13 @@ static FormatStyle expandPresets(const FormatStyle &Style) {
     Expanded.BraceWrapping.AfterNamespace = true;
     Expanded.BraceWrapping.AfterObjCDeclaration = true;
     Expanded.BraceWrapping.AfterStruct = true;
+    Expanded.BraceWrapping.AfterExternBlock = true;
     Expanded.BraceWrapping.BeforeCatch = true;
     Expanded.BraceWrapping.BeforeElse = true;
     break;
   case FormatStyle::BS_GNU:
-    Expanded.BraceWrapping = {true, true, true, true, true, true,
-                              true, true, true, true, true, true,
-                              true, true};
+    Expanded.BraceWrapping = {true, true, true, true, true, true, true, true,
+                              true, true, true, true, true, true, true};
     break;
   case FormatStyle::BS_WebKit:
     Expanded.BraceWrapping.AfterFunction = true;
@@ -573,9 +617,9 @@ FormatStyle getLLVMStyle() {
   LLVMStyle.BreakBeforeBinaryOperators = FormatStyle::BOS_None;
   LLVMStyle.BreakBeforeTernaryOperators = true;
   LLVMStyle.BreakBeforeBraces = FormatStyle::BS_Attach;
-  LLVMStyle.BraceWrapping = {false, false, false, false, false, false,
-                             false, false, false, false, false, true,
-                             true,  true};
+  LLVMStyle.BraceWrapping = {false, false, false, false, false,
+                             false, false, false, false, false,
+                             false, false, true,  true,  true};
   LLVMStyle.BreakAfterJavaFieldAnnotations = false;
   LLVMStyle.BreakConstructorInitializers = FormatStyle::BCIS_BeforeColon;
   LLVMStyle.BreakBeforeInheritanceComma = false;
@@ -597,6 +641,7 @@ FormatStyle getLLVMStyle() {
                                  {"^(<|\"(gtest|gmock|isl|json)/)", 3},
                                  {".*", 1}};
   LLVMStyle.IncludeIsMainRegex = "(Test)?$";
+  LLVMStyle.IncludeBlocks = FormatStyle::IBS_Preserve;
   LLVMStyle.IndentCaseLabels = false;
   LLVMStyle.IndentPPDirectives = FormatStyle::PPDIS_None;
   LLVMStyle.IndentWrappedFunctionNames = false;
@@ -607,6 +652,7 @@ FormatStyle getLLVMStyle() {
   LLVMStyle.MaxEmptyLinesToKeep = 1;
   LLVMStyle.KeepEmptyLinesAtTheStartOfBlocks = true;
   LLVMStyle.NamespaceIndentation = FormatStyle::NI_None;
+  LLVMStyle.ObjCBinPackProtocolList = FormatStyle::BPS_Auto;
   LLVMStyle.ObjCBlockIndentWidth = 2;
   LLVMStyle.ObjCSpaceAfterProperty = false;
   LLVMStyle.ObjCSpaceBeforeProtocolList = true;
@@ -622,7 +668,10 @@ FormatStyle getLLVMStyle() {
   LLVMStyle.SpacesInCStyleCastParentheses = false;
   LLVMStyle.SpaceAfterCStyleCast = false;
   LLVMStyle.SpaceAfterTemplateKeyword = true;
+  LLVMStyle.SpaceBeforeCtorInitializerColon = true;
+  LLVMStyle.SpaceBeforeInheritanceColon = true;
   LLVMStyle.SpaceBeforeParens = FormatStyle::SBPO_ControlStatements;
+  LLVMStyle.SpaceBeforeRangeBasedForLoopColon = true;
   LLVMStyle.SpaceBeforeAssignmentOperators = true;
   LLVMStyle.SpacesInAngles = false;
 
@@ -645,6 +694,7 @@ FormatStyle getGoogleStyle(FormatStyle::LanguageKind Language) {
   if (Language == FormatStyle::LK_TextProto) {
     FormatStyle GoogleStyle = getGoogleStyle(FormatStyle::LK_Proto);
     GoogleStyle.Language = FormatStyle::LK_TextProto;
+
     return GoogleStyle;
   }
 
@@ -659,13 +709,29 @@ FormatStyle getGoogleStyle(FormatStyle::LanguageKind Language) {
   GoogleStyle.AlwaysBreakTemplateDeclarations = true;
   GoogleStyle.ConstructorInitializerAllOnOneLineOrOnePerLine = true;
   GoogleStyle.DerivePointerAlignment = true;
-  GoogleStyle.IncludeCategories = {{"^<.*\\.h>", 1}, {"^<.*", 2}, {".*", 3}};
+  GoogleStyle.IncludeCategories = {
+      {"^<ext/.*\\.h>", 2}, {"^<.*\\.h>", 1}, {"^<.*", 2}, {".*", 3}};
   GoogleStyle.IncludeIsMainRegex = "([-_](test|unittest))?$";
   GoogleStyle.IndentCaseLabels = true;
   GoogleStyle.KeepEmptyLinesAtTheStartOfBlocks = false;
+  GoogleStyle.ObjCBinPackProtocolList = FormatStyle::BPS_Never;
   GoogleStyle.ObjCSpaceAfterProperty = false;
-  GoogleStyle.ObjCSpaceBeforeProtocolList = false;
+  GoogleStyle.ObjCSpaceBeforeProtocolList = true;
   GoogleStyle.PointerAlignment = FormatStyle::PAS_Left;
+  GoogleStyle.RawStringFormats = {{
+      FormatStyle::LK_TextProto,
+      /*Delimiters=*/
+      {
+          "pb",
+          "PB",
+          "proto",
+          "PROTO",
+      },
+      /*EnclosingFunctionNames=*/
+      {},
+      /*CanonicalDelimiter=*/"",
+      /*BasedOnStyle=*/"google",
+  }};
   GoogleStyle.SpacesBeforeTrailingComments = 2;
   GoogleStyle.Standard = FormatStyle::LS_Auto;
 
@@ -700,7 +766,15 @@ FormatStyle getGoogleStyle(FormatStyle::LanguageKind Language) {
     GoogleStyle.JavaScriptWrapImports = false;
   } else if (Language == FormatStyle::LK_Proto) {
     GoogleStyle.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_None;
+    GoogleStyle.AlwaysBreakBeforeMultilineStrings = false;
     GoogleStyle.SpacesInContainerLiterals = false;
+    GoogleStyle.Cpp11BracedListStyle = false;
+    // This affects protocol buffer options specifications and text protos.
+    // Text protos are currently mostly formatted inside C++ raw string literals
+    // and often the current breaking behavior of string literals is not
+    // beneficial there. Investigate turning this on once proper string reflow
+    // has been implemented.
+    GoogleStyle.BreakStringLiterals = false;
   } else if (Language == FormatStyle::LK_ObjC) {
     GoogleStyle.ColumnLimit = 100;
   }
@@ -735,8 +809,7 @@ FormatStyle getMozillaStyle() {
   FormatStyle MozillaStyle = getLLVMStyle();
   MozillaStyle.AllowAllParametersOfDeclarationOnNextLine = false;
   MozillaStyle.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_Inline;
-  MozillaStyle.AlwaysBreakAfterReturnType =
-      FormatStyle::RTBS_TopLevel;
+  MozillaStyle.AlwaysBreakAfterReturnType = FormatStyle::RTBS_TopLevel;
   MozillaStyle.AlwaysBreakAfterDefinitionReturnType =
       FormatStyle::DRTBS_TopLevel;
   MozillaStyle.AlwaysBreakTemplateDeclarations = true;
@@ -831,7 +904,7 @@ std::error_code parseConfiguration(StringRef Text, FormatStyle *Style) {
   assert(Language != FormatStyle::LK_None);
   if (Text.trim().empty())
     return make_error_code(ParseError::Error);
-
+  Style->StyleSet.Clear();
   std::vector<FormatStyle> Styles;
   llvm::yaml::Input Input(Text);
   // DocumentListTraits<vector<FormatStyle>> uses the context to get default
@@ -860,15 +933,23 @@ std::error_code parseConfiguration(StringRef Text, FormatStyle *Style) {
   // Look for a suitable configuration starting from the end, so we can
   // find the configuration for the specific language first, and the default
   // configuration (which can only be at slot 0) after it.
+  FormatStyle::FormatStyleSet StyleSet;
+  bool LanguageFound = false;
   for (int i = Styles.size() - 1; i >= 0; --i) {
-    if (Styles[i].Language == Language ||
-        Styles[i].Language == FormatStyle::LK_None) {
-      *Style = Styles[i];
-      Style->Language = Language;
-      return make_error_code(ParseError::Success);
-    }
+    if (Styles[i].Language != FormatStyle::LK_None)
+      StyleSet.Add(Styles[i]);
+    if (Styles[i].Language == Language)
+      LanguageFound = true;
   }
-  return make_error_code(ParseError::Unsuitable);
+  if (!LanguageFound) {
+    if (Styles.empty() || Styles[0].Language != FormatStyle::LK_None)
+      return make_error_code(ParseError::Unsuitable);
+    FormatStyle DefaultStyle = Styles[0];
+    DefaultStyle.Language = Language;
+    StyleSet.Add(std::move(DefaultStyle));
+  }
+  *Style = *StyleSet.Get(Language);
+  return make_error_code(ParseError::Success);
 }
 
 std::string configurationAsText(const FormatStyle &Style) {
@@ -882,6 +963,38 @@ std::string configurationAsText(const FormatStyle &Style) {
   return Stream.str();
 }
 
+llvm::Optional<FormatStyle>
+FormatStyle::FormatStyleSet::Get(FormatStyle::LanguageKind Language) const {
+  if (!Styles)
+    return None;
+  auto It = Styles->find(Language);
+  if (It == Styles->end())
+    return None;
+  FormatStyle Style = It->second;
+  Style.StyleSet = *this;
+  return Style;
+}
+
+void FormatStyle::FormatStyleSet::Add(FormatStyle Style) {
+  assert(Style.Language != LK_None &&
+         "Cannot add a style for LK_None to a StyleSet");
+  assert(
+      !Style.StyleSet.Styles &&
+      "Cannot add a style associated with an existing StyleSet to a StyleSet");
+  if (!Styles)
+    Styles = std::make_shared<MapType>();
+  (*Styles)[Style.Language] = std::move(Style);
+}
+
+void FormatStyle::FormatStyleSet::Clear() {
+  Styles.reset();
+}
+
+llvm::Optional<FormatStyle>
+FormatStyle::GetLanguageStyle(FormatStyle::LanguageKind Language) const {
+  return StyleSet.Get(Language);
+}
+
 namespace {
 
 class JavaScriptRequoter : public TokenAnalyzer {
@@ -889,15 +1002,14 @@ public:
   JavaScriptRequoter(const Environment &Env, const FormatStyle &Style)
       : TokenAnalyzer(Env, Style) {}
 
-  tooling::Replacements
+  std::pair<tooling::Replacements, unsigned>
   analyze(TokenAnnotator &Annotator,
           SmallVectorImpl<AnnotatedLine *> &AnnotatedLines,
           FormatTokenLexer &Tokens) override {
-    AffectedRangeMgr.computeAffectedLines(AnnotatedLines.begin(),
-                                          AnnotatedLines.end());
+    AffectedRangeMgr.computeAffectedLines(AnnotatedLines);
     tooling::Replacements Result;
     requoteJSStringLiteral(AnnotatedLines, Result);
-    return Result;
+    return {Result, 0};
   }
 
 private:
@@ -978,14 +1090,13 @@ public:
             FormattingAttemptStatus *Status)
       : TokenAnalyzer(Env, Style), Status(Status) {}
 
-  tooling::Replacements
+  std::pair<tooling::Replacements, unsigned>
   analyze(TokenAnnotator &Annotator,
           SmallVectorImpl<AnnotatedLine *> &AnnotatedLines,
           FormatTokenLexer &Tokens) override {
     tooling::Replacements Result;
     deriveLocalStyle(AnnotatedLines);
-    AffectedRangeMgr.computeAffectedLines(AnnotatedLines.begin(),
-                                          AnnotatedLines.end());
+    AffectedRangeMgr.computeAffectedLines(AnnotatedLines);
     for (unsigned i = 0, e = AnnotatedLines.size(); i != e; ++i) {
       Annotator.calculateFormattingInformation(*AnnotatedLines[i]);
     }
@@ -997,17 +1108,23 @@ public:
     ContinuationIndenter Indenter(Style, Tokens.getKeywords(),
                                   Env.getSourceManager(), Whitespaces, Encoding,
                                   BinPackInconclusiveFunctions);
-    UnwrappedLineFormatter(&Indenter, &Whitespaces, Style, Tokens.getKeywords(),
-                           Env.getSourceManager(), Status)
-        .format(AnnotatedLines);
+    unsigned Penalty =
+        UnwrappedLineFormatter(&Indenter, &Whitespaces, Style,
+                               Tokens.getKeywords(), Env.getSourceManager(),
+                               Status)
+            .format(AnnotatedLines, /*DryRun=*/false,
+                    /*AdditionalIndent=*/0,
+                    /*FixBadIndentation=*/false,
+                    /*FirstStartColumn=*/Env.getFirstStartColumn(),
+                    /*NextStartColumn=*/Env.getNextStartColumn(),
+                    /*LastStartColumn=*/Env.getLastStartColumn());
     for (const auto &R : Whitespaces.generateReplacements())
       if (Result.add(R))
-        return Result;
-    return Result;
+        return std::make_pair(Result, 0);
+    return std::make_pair(Result, Penalty);
   }
 
 private:
-
   static bool inputUsesCRLF(StringRef Text) {
     return Text.count('\r') * 2 > Text.count('\n');
   }
@@ -1092,7 +1209,7 @@ public:
         DeletedTokens(FormatTokenLess(Env.getSourceManager())) {}
 
   // FIXME: eliminate unused parameters.
-  tooling::Replacements
+  std::pair<tooling::Replacements, unsigned>
   analyze(TokenAnnotator &Annotator,
           SmallVectorImpl<AnnotatedLine *> &AnnotatedLines,
           FormatTokenLexer &Tokens) override {
@@ -1103,8 +1220,7 @@ public:
     // To determine if some redundant code is actually introduced by
     // replacements(e.g. deletions), we need to come up with a more
     // sophisticated way of computing affected ranges.
-    AffectedRangeMgr.computeAffectedLines(AnnotatedLines.begin(),
-                                          AnnotatedLines.end());
+    AffectedRangeMgr.computeAffectedLines(AnnotatedLines);
 
     checkEmptyNamespace(AnnotatedLines);
 
@@ -1120,7 +1236,7 @@ public:
       }
     }
 
-    return generateFixes();
+    return {generateFixes(), 0};
   }
 
 private:
@@ -1307,6 +1423,128 @@ private:
   std::set<FormatToken *, FormatTokenLess> DeletedTokens;
 };
 
+class ObjCHeaderStyleGuesser : public TokenAnalyzer {
+public:
+  ObjCHeaderStyleGuesser(const Environment &Env, const FormatStyle &Style)
+      : TokenAnalyzer(Env, Style), IsObjC(false) {}
+
+  std::pair<tooling::Replacements, unsigned>
+  analyze(TokenAnnotator &Annotator,
+          SmallVectorImpl<AnnotatedLine *> &AnnotatedLines,
+          FormatTokenLexer &Tokens) override {
+    assert(Style.Language == FormatStyle::LK_Cpp);
+    IsObjC = guessIsObjC(AnnotatedLines, Tokens.getKeywords());
+    tooling::Replacements Result;
+    return {Result, 0};
+  }
+
+  bool isObjC() { return IsObjC; }
+
+private:
+  static bool guessIsObjC(const SmallVectorImpl<AnnotatedLine *> &AnnotatedLines,
+                          const AdditionalKeywords &Keywords) {
+    // Keep this array sorted, since we are binary searching over it.
+    static constexpr llvm::StringLiteral FoundationIdentifiers[] = {
+        "CGFloat",
+        "CGPoint",
+        "CGPointMake",
+        "CGPointZero",
+        "CGRect",
+        "CGRectEdge",
+        "CGRectInfinite",
+        "CGRectMake",
+        "CGRectNull",
+        "CGRectZero",
+        "CGSize",
+        "CGSizeMake",
+        "CGVector",
+        "CGVectorMake",
+        "NSAffineTransform",
+        "NSArray",
+        "NSAttributedString",
+        "NSBlockOperation",
+        "NSBundle",
+        "NSCache",
+        "NSCalendar",
+        "NSCharacterSet",
+        "NSCountedSet",
+        "NSData",
+        "NSDataDetector",
+        "NSDecimal",
+        "NSDecimalNumber",
+        "NSDictionary",
+        "NSEdgeInsets",
+        "NSHashTable",
+        "NSIndexPath",
+        "NSIndexSet",
+        "NSInteger",
+        "NSInvocationOperation",
+        "NSLocale",
+        "NSMapTable",
+        "NSMutableArray",
+        "NSMutableAttributedString",
+        "NSMutableCharacterSet",
+        "NSMutableData",
+        "NSMutableDictionary",
+        "NSMutableIndexSet",
+        "NSMutableOrderedSet",
+        "NSMutableSet",
+        "NSMutableString",
+        "NSNumber",
+        "NSNumberFormatter",
+        "NSObject",
+        "NSOperation",
+        "NSOperationQueue",
+        "NSOperationQueuePriority",
+        "NSOrderedSet",
+        "NSPoint",
+        "NSPointerArray",
+        "NSQualityOfService",
+        "NSRange",
+        "NSRect",
+        "NSRegularExpression",
+        "NSSet",
+        "NSSize",
+        "NSString",
+        "NSTimeZone",
+        "NSUInteger",
+        "NSURL",
+        "NSURLComponents",
+        "NSURLQueryItem",
+        "NSUUID",
+        "NSValue",
+        "UIImage",
+        "UIView",
+    };
+
+    for (auto Line : AnnotatedLines) {
+      for (const FormatToken *FormatTok = Line->First; FormatTok;
+           FormatTok = FormatTok->Next) {
+        if ((FormatTok->Previous && FormatTok->Previous->is(tok::at) &&
+             (FormatTok->Tok.getObjCKeywordID() != tok::objc_not_keyword ||
+              FormatTok->isOneOf(tok::numeric_constant, tok::l_square,
+                                 tok::l_brace))) ||
+            (FormatTok->Tok.isAnyIdentifier() &&
+             std::binary_search(std::begin(FoundationIdentifiers),
+                                std::end(FoundationIdentifiers),
+                                FormatTok->TokenText)) ||
+            FormatTok->is(TT_ObjCStringLiteral) ||
+            FormatTok->isOneOf(Keywords.kw_NS_ENUM, Keywords.kw_NS_OPTIONS,
+                               TT_ObjCBlockLBrace, TT_ObjCBlockLParen,
+                               TT_ObjCDecl, TT_ObjCForIn, TT_ObjCMethodExpr,
+                               TT_ObjCMethodSpecifier, TT_ObjCProperty)) {
+          return true;
+        }
+        if (guessIsObjC(Line->Children, Keywords))
+          return true;
+      }
+    }
+    return false;
+  }
+
+  bool IsObjC;
+};
+
 struct IncludeDirective {
   StringRef Filename;
   StringRef Text;
@@ -1396,19 +1634,27 @@ static void sortCppIncludes(const FormatStyle &Style,
                             }),
                 Indices.end());
 
+  int CurrentCategory = Includes.front().Category;
+
   // If the #includes are out of order, we generate a single replacement fixing
   // the entire block. Otherwise, no replacement is generated.
   if (Indices.size() == Includes.size() &&
-      std::is_sorted(Indices.begin(), Indices.end()))
+      std::is_sorted(Indices.begin(), Indices.end()) &&
+      Style.IncludeBlocks == FormatStyle::IBS_Preserve)
     return;
 
   std::string result;
   for (unsigned Index : Indices) {
-    if (!result.empty())
+    if (!result.empty()) {
       result += "\n";
+      if (Style.IncludeBlocks == FormatStyle::IBS_Regroup &&
+          CurrentCategory != Includes[Index].Category)
+        result += "\n";
+    }
     result += Includes[Index].Text;
     if (Cursor && CursorIndex == Index)
       *Cursor = IncludesBeginOffset + result.size() - CursorToEOLOffset;
+    CurrentCategory = Includes[Index].Category;
   }
 
   auto Err = Replaces.add(tooling::Replacement(
@@ -1516,6 +1762,10 @@ tooling::Replacements sortCppIncludes(const FormatStyle &Style, StringRef Code,
     else if (Trimmed == "// clang-format on")
       FormattingOff = false;
 
+    const bool EmptyLineSkipped =
+        Trimmed.empty() && (Style.IncludeBlocks == FormatStyle::IBS_Merge ||
+                            Style.IncludeBlocks == FormatStyle::IBS_Regroup);
+
     if (!FormattingOff && !Line.endswith("\\")) {
       if (IncludeRegex.match(Line, &Matches)) {
         StringRef IncludeName = Matches[2];
@@ -1525,7 +1775,7 @@ tooling::Replacements sortCppIncludes(const FormatStyle &Style, StringRef Code,
         if (Category == 0)
           MainIncludeFound = true;
         IncludesInBlock.push_back({IncludeName, Line, Prev, Category});
-      } else if (!IncludesInBlock.empty()) {
+      } else if (!IncludesInBlock.empty() && !EmptyLineSkipped) {
         sortCppIncludes(Style, IncludesInBlock, Ranges, FileName, Replaces,
                         Cursor);
         IncludesInBlock.clear();
@@ -1549,9 +1799,7 @@ bool isMpegTS(StringRef Code) {
   return Code.size() > 188 && Code[0] == 0x47 && Code[188] == 0x47;
 }
 
-bool isLikelyXml(StringRef Code) {
-  return Code.ltrim().startswith("<");
-}
+bool isLikelyXml(StringRef Code) { return Code.ltrim().startswith("<"); }
 
 tooling::Replacements sortIncludes(const FormatStyle &Style, StringRef Code,
                                    ArrayRef<tooling::Range> Ranges,
@@ -1903,19 +2151,22 @@ cleanupAroundReplacements(StringRef Code, const tooling::Replacements &Replaces,
   return processReplacements(Cleanup, Code, NewReplaces, Style);
 }
 
-tooling::Replacements reformat(const FormatStyle &Style, StringRef Code,
-                               ArrayRef<tooling::Range> Ranges,
-                               StringRef FileName,
-                               FormattingAttemptStatus *Status) {
+namespace internal {
+std::pair<tooling::Replacements, unsigned>
+reformat(const FormatStyle &Style, StringRef Code,
+         ArrayRef<tooling::Range> Ranges, unsigned FirstStartColumn,
+         unsigned NextStartColumn, unsigned LastStartColumn, StringRef FileName,
+         FormattingAttemptStatus *Status) {
   FormatStyle Expanded = expandPresets(Style);
   if (Expanded.DisableFormat)
-    return tooling::Replacements();
+    return {tooling::Replacements(), 0};
   if (isLikelyXml(Code))
-    return tooling::Replacements();
+    return {tooling::Replacements(), 0};
   if (Expanded.Language == FormatStyle::LK_JavaScript && isMpegTS(Code))
-    return tooling::Replacements();
+    return {tooling::Replacements(), 0};
 
-  typedef std::function<tooling::Replacements(const Environment &)>
+  typedef std::function<std::pair<tooling::Replacements, unsigned>(
+      const Environment &)>
       AnalyzerPass;
   SmallVector<AnalyzerPass, 4> Passes;
 
@@ -1941,26 +2192,42 @@ tooling::Replacements reformat(const FormatStyle &Style, StringRef Code,
     return Formatter(Env, Expanded, Status).process();
   });
 
-  std::unique_ptr<Environment> Env =
-      Environment::CreateVirtualEnvironment(Code, FileName, Ranges);
+  std::unique_ptr<Environment> Env = Environment::CreateVirtualEnvironment(
+      Code, FileName, Ranges, FirstStartColumn, NextStartColumn,
+      LastStartColumn);
   llvm::Optional<std::string> CurrentCode = None;
   tooling::Replacements Fixes;
+  unsigned Penalty = 0;
   for (size_t I = 0, E = Passes.size(); I < E; ++I) {
-    tooling::Replacements PassFixes = Passes[I](*Env);
+    std::pair<tooling::Replacements, unsigned> PassFixes = Passes[I](*Env);
     auto NewCode = applyAllReplacements(
-        CurrentCode ? StringRef(*CurrentCode) : Code, PassFixes);
+        CurrentCode ? StringRef(*CurrentCode) : Code, PassFixes.first);
     if (NewCode) {
-      Fixes = Fixes.merge(PassFixes);
+      Fixes = Fixes.merge(PassFixes.first);
+      Penalty += PassFixes.second;
       if (I + 1 < E) {
         CurrentCode = std::move(*NewCode);
         Env = Environment::CreateVirtualEnvironment(
             *CurrentCode, FileName,
-            tooling::calculateRangesAfterReplacements(Fixes, Ranges));
+            tooling::calculateRangesAfterReplacements(Fixes, Ranges),
+            FirstStartColumn, NextStartColumn, LastStartColumn);
       }
     }
   }
 
-  return Fixes;
+  return {Fixes, Penalty};
+}
+} // namespace internal
+
+tooling::Replacements reformat(const FormatStyle &Style, StringRef Code,
+                               ArrayRef<tooling::Range> Ranges,
+                               StringRef FileName,
+                               FormattingAttemptStatus *Status) {
+  return internal::reformat(Style, Code, Ranges,
+                            /*FirstStartColumn=*/0,
+                            /*NextStartColumn=*/0,
+                            /*LastStartColumn=*/0, FileName, Status)
+      .first;
 }
 
 tooling::Replacements cleanup(const FormatStyle &Style, StringRef Code,
@@ -1972,7 +2239,7 @@ tooling::Replacements cleanup(const FormatStyle &Style, StringRef Code,
   std::unique_ptr<Environment> Env =
       Environment::CreateVirtualEnvironment(Code, FileName, Ranges);
   Cleaner Clean(*Env, Style);
-  return Clean.process();
+  return Clean.process().first;
 }
 
 tooling::Replacements reformat(const FormatStyle &Style, StringRef Code,
@@ -1992,7 +2259,7 @@ tooling::Replacements fixNamespaceEndComments(const FormatStyle &Style,
   std::unique_ptr<Environment> Env =
       Environment::CreateVirtualEnvironment(Code, FileName, Ranges);
   NamespaceEndCommentsFixer Fix(*Env, Style);
-  return Fix.process();
+  return Fix.process().first;
 }
 
 tooling::Replacements sortUsingDeclarations(const FormatStyle &Style,
@@ -2002,7 +2269,7 @@ tooling::Replacements sortUsingDeclarations(const FormatStyle &Style,
   std::unique_ptr<Environment> Env =
       Environment::CreateVirtualEnvironment(Code, FileName, Ranges);
   UsingDeclarationsSorter Sorter(*Env, Style);
-  return Sorter.process();
+  return Sorter.process().first;
 }
 
 LangOptions getFormattingLangOpts(const FormatStyle &Style) {
@@ -2010,7 +2277,8 @@ LangOptions getFormattingLangOpts(const FormatStyle &Style) {
   LangOpts.CPlusPlus = 1;
   LangOpts.CPlusPlus11 = Style.Standard == FormatStyle::LS_Cpp03 ? 0 : 1;
   LangOpts.CPlusPlus14 = Style.Standard == FormatStyle::LS_Cpp03 ? 0 : 1;
-  LangOpts.CPlusPlus1z = Style.Standard == FormatStyle::LS_Cpp03 ? 0 : 1;
+  LangOpts.CPlusPlus17 = Style.Standard == FormatStyle::LS_Cpp03 ? 0 : 1;
+  LangOpts.CPlusPlus2a = Style.Standard == FormatStyle::LS_Cpp03 ? 0 : 1;
   LangOpts.LineComment = 1;
   bool AlternativeOperators = Style.isCpp();
   LangOpts.CXXOperatorNames = AlternativeOperators ? 1 : 0;
@@ -2043,9 +2311,33 @@ static FormatStyle::LanguageKind getLanguageByFileName(StringRef FileName) {
   if (FileName.endswith_lower(".proto") ||
       FileName.endswith_lower(".protodevel"))
     return FormatStyle::LK_Proto;
+  if (FileName.endswith_lower(".textpb") ||
+      FileName.endswith_lower(".pb.txt") ||
+      FileName.endswith_lower(".textproto") ||
+      FileName.endswith_lower(".asciipb"))
+    return FormatStyle::LK_TextProto;
   if (FileName.endswith_lower(".td"))
     return FormatStyle::LK_TableGen;
   return FormatStyle::LK_Cpp;
+}
+
+FormatStyle::LanguageKind guessLanguage(StringRef FileName, StringRef Code) {
+  const auto GuessedLanguage = getLanguageByFileName(FileName);
+  if (GuessedLanguage == FormatStyle::LK_Cpp) {
+    auto Extension = llvm::sys::path::extension(FileName);
+    // If there's no file extension (or it's .h), we need to check the contents
+    // of the code to see if it contains Objective-C.
+    if (Extension.empty() || Extension == ".h") {
+      auto NonEmptyFileName = FileName.empty() ? "guess.h" : FileName;
+      std::unique_ptr<Environment> Env =
+          Environment::CreateVirtualEnvironment(Code, NonEmptyFileName, /*Ranges=*/{});
+      ObjCHeaderStyleGuesser Guesser(*Env, getLLVMStyle());
+      Guesser.process();
+      if (Guesser.isObjC())
+        return FormatStyle::LK_ObjC;
+    }
+  }
+  return GuessedLanguage;
 }
 
 llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
@@ -2055,14 +2347,7 @@ llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
     FS = vfs::getRealFileSystem().get();
   }
   FormatStyle Style = getLLVMStyle();
-  Style.Language = getLanguageByFileName(FileName);
-
-  // This is a very crude detection of whether a header contains ObjC code that
-  // should be improved over time and probably be done on tokens, not one the
-  // bare content of the file.
-  if (Style.Language == FormatStyle::LK_Cpp && FileName.endswith(".h") &&
-      (Code.contains("\n- (") || Code.contains("\n+ (")))
-    Style.Language = FormatStyle::LK_ObjC;
+  Style.Language = guessLanguage(FileName, Code);
 
   FormatStyle FallbackStyle = getNoStyle();
   if (!getPredefinedStyle(FallbackStyleName, Style.Language, &FallbackStyle))

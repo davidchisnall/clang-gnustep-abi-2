@@ -202,7 +202,7 @@ namespace clang {
     ParsingDeclRAIIObject ParsingRAII;
 
   public:
-    ParsingDeclarator(Parser &P, const ParsingDeclSpec &DS, TheContext C)
+    ParsingDeclarator(Parser &P, const ParsingDeclSpec &DS, DeclaratorContext C)
       : Declarator(DS, C), ParsingRAII(P, &DS.getDelayedDiagnosticPool()) {
     }
 
@@ -377,8 +377,6 @@ namespace clang {
         default: llvm_unreachable("Wrong token kind");
       }
     }
-    
-    enum { MaxDepth = 256 };
     
     bool diagnoseOverflow();
     bool diagnoseMissingClose();

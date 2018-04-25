@@ -11,6 +11,7 @@
 #include "Arch/ARM.h"
 #include "Arch/Mips.h"
 #include "Arch/PPC.h"
+#include "Arch/RISCV.h"
 #include "CommonArgs.h"
 #include "clang/Basic/VirtualFileSystem.h"
 #include "clang/Config/config.h"
@@ -21,6 +22,7 @@
 #include "llvm/Option/ArgList.h"
 #include "llvm/ProfileData/InstrProf.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include <system_error>
 
 using namespace clang::driver;
@@ -41,6 +43,7 @@ static std::string getMultiarchTriple(const Driver &D,
                                       StringRef SysRoot) {
   llvm::Triple::EnvironmentType TargetEnvironment =
       TargetTriple.getEnvironment();
+  bool IsAndroid = TargetTriple.isAndroid();
 
   // For most architectures, just use whatever we have rather than trying to be
   // clever.
@@ -54,7 +57,9 @@ static std::string getMultiarchTriple(const Driver &D,
   // regardless of what the actual target triple is.
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
-    if (TargetEnvironment == llvm::Triple::GNUEABIHF) {
+    if (IsAndroid) {
+      return "arm-linux-androideabi";
+    } else if (TargetEnvironment == llvm::Triple::GNUEABIHF) {
       if (D.getVFS().exists(SysRoot + "/lib/arm-linux-gnueabihf"))
         return "arm-linux-gnueabihf";
     } else {
@@ -73,16 +78,22 @@ static std::string getMultiarchTriple(const Driver &D,
     }
     break;
   case llvm::Triple::x86:
+    if (IsAndroid)
+      return "i686-linux-android";
     if (D.getVFS().exists(SysRoot + "/lib/i386-linux-gnu"))
       return "i386-linux-gnu";
     break;
   case llvm::Triple::x86_64:
+    if (IsAndroid)
+      return "x86_64-linux-android";
     // We don't want this for x32, otherwise it will match x86_64 libs
     if (TargetEnvironment != llvm::Triple::GNUX32 &&
         D.getVFS().exists(SysRoot + "/lib/x86_64-linux-gnu"))
       return "x86_64-linux-gnu";
     break;
   case llvm::Triple::aarch64:
+    if (IsAndroid)
+      return "aarch64-linux-android";
     if (D.getVFS().exists(SysRoot + "/lib/aarch64-linux-gnu"))
       return "aarch64-linux-gnu";
     break;
@@ -95,6 +106,8 @@ static std::string getMultiarchTriple(const Driver &D,
       return "mips-linux-gnu";
     break;
   case llvm::Triple::mipsel:
+    if (IsAndroid)
+      return "mipsel-linux-android";
     if (D.getVFS().exists(SysRoot + "/lib/mipsel-linux-gnu"))
       return "mipsel-linux-gnu";
     break;
@@ -105,6 +118,8 @@ static std::string getMultiarchTriple(const Driver &D,
       return "mips64-linux-gnuabi64";
     break;
   case llvm::Triple::mips64el:
+    if (IsAndroid)
+      return "mips64el-linux-android";
     if (D.getVFS().exists(SysRoot + "/lib/mips64el-linux-gnu"))
       return "mips64el-linux-gnu";
     if (D.getVFS().exists(SysRoot + "/lib/mips64el-linux-gnuabi64"))
@@ -176,6 +191,9 @@ static StringRef getOSLibDir(const llvm::Triple &Triple, const ArgList &Args) {
       Triple.getEnvironment() == llvm::Triple::GNUX32)
     return "libx32";
 
+  if (Triple.getArch() == llvm::Triple::riscv32)
+    return "lib32";
+
   return Triple.isArch32Bit() ? "lib" : "lib64";
 }
 
@@ -210,7 +228,12 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
 
   Distro Distro(D.getVFS());
 
-  if (Distro.IsOpenSUSE() || Distro.IsUbuntu()) {
+  if (Distro.IsAlpineLinux()) {
+    ExtraOpts.push_back("-z");
+    ExtraOpts.push_back("now");
+  }
+
+  if (Distro.IsOpenSUSE() || Distro.IsUbuntu() || Distro.IsAlpineLinux()) {
     ExtraOpts.push_back("-z");
     ExtraOpts.push_back("relro");
   }
@@ -221,6 +244,8 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
   const bool IsAndroid = Triple.isAndroid();
   const bool IsMips = tools::isMipsArch(Arch);
   const bool IsHexagon = Arch == llvm::Triple::hexagon;
+  const bool IsRISCV =
+      Arch == llvm::Triple::riscv32 || Arch == llvm::Triple::riscv64;
 
   if (IsMips && !SysRoot.empty())
     ExtraOpts.push_back("--sysroot=" + SysRoot);
@@ -232,7 +257,7 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
   // Android loader does not support .gnu.hash.
   // Hexagon linker/loader does not support .gnu.hash
   if (!IsMips && !IsAndroid && !IsHexagon) {
-    if (Distro.IsRedhat() || Distro.IsOpenSUSE() ||
+    if (Distro.IsRedhat() || Distro.IsOpenSUSE() || Distro.IsAlpineLinux() ||
         (Distro.IsUbuntu() && Distro >= Distro::UbuntuMaverick))
       ExtraOpts.push_back("--hash-style=gnu");
 
@@ -248,7 +273,7 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
   ExtraOpts.push_back("--build-id");
 #endif
 
-  if (Distro.IsOpenSUSE())
+  if (IsAndroid || Distro.IsOpenSUSE())
     ExtraOpts.push_back("--enable-new-dtags");
 
   // The selection of paths to try here is designed to match the patterns which
@@ -326,8 +351,28 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
 
   addPathIfExists(D, SysRoot + "/lib/" + MultiarchTriple, Paths);
   addPathIfExists(D, SysRoot + "/lib/../" + OSLibDir, Paths);
+
+  if (IsAndroid) {
+    // Android sysroots contain a library directory for each supported OS
+    // version as well as some unversioned libraries in the usual multiarch
+    // directory.
+    unsigned Major;
+    unsigned Minor;
+    unsigned Micro;
+    Triple.getEnvironmentVersion(Major, Minor, Micro);
+    addPathIfExists(D,
+                    SysRoot + "/usr/lib/" + MultiarchTriple + "/" +
+                        llvm::to_string(Major),
+                    Paths);
+  }
+
   addPathIfExists(D, SysRoot + "/usr/lib/" + MultiarchTriple, Paths);
   addPathIfExists(D, SysRoot + "/usr/lib/../" + OSLibDir, Paths);
+  if (IsRISCV) {
+    StringRef ABIName = tools::riscv::getRISCVABI(Args, Triple);
+    addPathIfExists(D, SysRoot + "/" + OSLibDir + "/" + ABIName, Paths);
+    addPathIfExists(D, SysRoot + "/usr/" + OSLibDir + "/" + ABIName, Paths);
+  }
 
   // Try walking via the GCC triple path in case of biarch or multiarch GCC
   // installations with strange symlinks.
@@ -506,6 +551,18 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
     Loader =
         (tools::ppc::hasPPCAbiArg(Args, "elfv1")) ? "ld64.so.1" : "ld64.so.2";
     break;
+  case llvm::Triple::riscv32: {
+    StringRef ABIName = tools::riscv::getRISCVABI(Args, Triple);
+    LibDir = "lib";
+    Loader = ("ld-linux-riscv32-" + ABIName + ".so.1").str();
+    break;
+  }
+  case llvm::Triple::riscv64: {
+    StringRef ABIName = tools::riscv::getRISCVABI(Args, Triple);
+    LibDir = "lib";
+    Loader = ("ld-linux-riscv64-" + ABIName + ".so.1").str();
+    break;
+  }
   case llvm::Triple::sparc:
   case llvm::Triple::sparcel:
     LibDir = "lib";
@@ -689,6 +746,14 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
   default:
     break;
   }
+
+  const std::string AndroidMultiarchIncludeDir =
+      std::string("/usr/include/") +
+      getMultiarchTriple(D, getTriple(), SysRoot);
+  const StringRef AndroidMultiarchIncludeDirs[] = {AndroidMultiarchIncludeDir};
+  if (getTriple().isAndroid())
+    MultiarchIncludeDirs = AndroidMultiarchIncludeDirs;
+
   for (StringRef Dir : MultiarchIncludeDirs) {
     if (D.getVFS().exists(SysRoot + Dir)) {
       addExternCSystemInclude(DriverArgs, CC1Args, SysRoot + Dir);
@@ -726,7 +791,8 @@ static std::string DetectLibcxxIncludePath(StringRef base) {
   return MaxVersion ? (base + "/" + MaxVersionString).str() : "";
 }
 
-std::string Linux::findLibCxxIncludePath() const {
+void Linux::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                  llvm::opt::ArgStringList &CC1Args) const {
   const std::string LibCXXIncludePathCandidates[] = {
       DetectLibcxxIncludePath(getDriver().Dir + "/../include/c++"),
       // If this is a development, non-installed, clang, libcxx will
@@ -738,9 +804,9 @@ std::string Linux::findLibCxxIncludePath() const {
     if (IncludePath.empty() || !getVFS().exists(IncludePath))
       continue;
     // Use the first candidate that exists.
-    return IncludePath;
+    addSystemInclude(DriverArgs, CC1Args, IncludePath);
+    return;
   }
-  return "";
 }
 
 void Linux::addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
@@ -810,11 +876,16 @@ void Linux::AddIAMCUIncludeArgs(const ArgList &DriverArgs,
   }
 }
 
-bool Linux::isPIEDefault() const { return getSanitizerArgs().requiresPIE(); }
+bool Linux::isPIEDefault() const {
+  return (getTriple().isAndroid() && !getTriple().isAndroidVersionLT(16)) ||
+          getTriple().isMusl() || getSanitizerArgs().requiresPIE();
+}
 
 SanitizerMask Linux::getSupportedSanitizers() const {
   const bool IsX86 = getTriple().getArch() == llvm::Triple::x86;
   const bool IsX86_64 = getTriple().getArch() == llvm::Triple::x86_64;
+  const bool IsMIPS = getTriple().getArch() == llvm::Triple::mips ||
+                      getTriple().getArch() == llvm::Triple::mipsel;
   const bool IsMIPS64 = getTriple().getArch() == llvm::Triple::mips64 ||
                         getTriple().getArch() == llvm::Triple::mips64el;
   const bool IsPowerPC64 = getTriple().getArch() == llvm::Triple::ppc64 ||
@@ -830,20 +901,24 @@ SanitizerMask Linux::getSupportedSanitizers() const {
   Res |= SanitizerKind::Fuzzer;
   Res |= SanitizerKind::FuzzerNoLink;
   Res |= SanitizerKind::KernelAddress;
+  Res |= SanitizerKind::Memory;
   Res |= SanitizerKind::Vptr;
   Res |= SanitizerKind::SafeStack;
   if (IsX86_64 || IsMIPS64 || IsAArch64)
     Res |= SanitizerKind::DataFlow;
-  if (IsX86_64 || IsMIPS64 || IsAArch64 || IsX86 || IsArmArch)
+  if (IsX86_64 || IsMIPS64 || IsAArch64 || IsX86 || IsArmArch || IsPowerPC64)
     Res |= SanitizerKind::Leak;
   if (IsX86_64 || IsMIPS64 || IsAArch64 || IsPowerPC64)
     Res |= SanitizerKind::Thread;
-  if (IsX86_64 || IsMIPS64 || IsPowerPC64 || IsAArch64)
-    Res |= SanitizerKind::Memory;
   if (IsX86_64 || IsMIPS64)
     Res |= SanitizerKind::Efficiency;
-  if (IsX86 || IsX86_64) {
+  if (IsX86 || IsX86_64)
     Res |= SanitizerKind::Function;
+  if (IsX86_64 || IsMIPS64 || IsAArch64 || IsX86 || IsMIPS || IsArmArch)
+    Res |= SanitizerKind::Scudo;
+  if (IsX86_64 || IsAArch64) {
+    Res |= SanitizerKind::HWAddress;
+    Res |= SanitizerKind::KernelHWAddress;
   }
   return Res;
 }

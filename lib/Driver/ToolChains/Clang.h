@@ -42,6 +42,10 @@ private:
                                const InputInfo &Output,
                                const InputInfoList &Inputs) const;
 
+  void RenderTargetOptions(const llvm::Triple &EffectiveTriple,
+                           const llvm::opt::ArgList &Args, bool KernelOrKext,
+                           llvm::opt::ArgStringList &CmdArgs) const;
+
   void AddAArch64TargetArgs(const llvm::opt::ArgList &Args,
                             llvm::opt::ArgStringList &CmdArgs) const;
   void AddARMTargetArgs(const llvm::Triple &Triple,
@@ -56,6 +60,8 @@ private:
                         llvm::opt::ArgStringList &CmdArgs) const;
   void AddR600TargetArgs(const llvm::opt::ArgList &Args,
                          llvm::opt::ArgStringList &CmdArgs) const;
+  void AddRISCVTargetArgs(const llvm::opt::ArgList &Args,
+                          llvm::opt::ArgStringList &CmdArgs) const;
   void AddSparcTargetArgs(const llvm::opt::ArgList &Args,
                           llvm::opt::ArgStringList &CmdArgs) const;
   void AddSystemZTargetArgs(const llvm::opt::ArgList &Args,

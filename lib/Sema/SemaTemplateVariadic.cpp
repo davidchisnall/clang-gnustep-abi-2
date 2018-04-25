@@ -314,8 +314,18 @@ Sema::DiagnoseUnexpandedParameterPacks(SourceLocation Loc,
   // later.
   SmallVector<UnexpandedParameterPack, 4> LambdaParamPackReferences;
   for (unsigned N = FunctionScopes.size(); N; --N) {
-    if (sema::LambdaScopeInfo *LSI =
-          dyn_cast<sema::LambdaScopeInfo>(FunctionScopes[N-1])) {
+    sema::FunctionScopeInfo *Func = FunctionScopes[N-1];
+    // We do not permit pack expansion that would duplicate a statement
+    // expression, not even within a lambda.
+    // FIXME: We could probably support this for statement expressions that do
+    // not contain labels, and for pack expansions that expand both the stmt
+    // expr and the enclosing lambda.
+    if (std::any_of(
+            Func->CompoundScopes.begin(), Func->CompoundScopes.end(),
+            [](sema::CompoundScopeInfo &CSI) { return CSI.IsStmtExpr; }))
+      break;
+
+    if (auto *LSI = dyn_cast<sema::LambdaScopeInfo>(Func)) {
       if (N == FunctionScopes.size()) {
         for (auto &Param : Unexpanded) {
           auto *PD = dyn_cast_or_null<ParmVarDecl>(
@@ -819,6 +829,7 @@ bool Sema::containsUnexpandedParameterPacks(Declarator &D) {
   case TST_half:
   case TST_float:
   case TST_double:
+  case TST_Float16:
   case TST_float128:
   case TST_bool:
   case TST_decimal32:

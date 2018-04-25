@@ -63,8 +63,8 @@
   OPERATOR(PtrMemD) OPERATOR(PtrMemI) OPERATOR(Mul) OPERATOR(Div)              \
       OPERATOR(Rem) OPERATOR(Add) OPERATOR(Sub) OPERATOR(Shl) OPERATOR(Shr)    \
       OPERATOR(LT) OPERATOR(GT) OPERATOR(LE) OPERATOR(GE) OPERATOR(EQ)         \
-      OPERATOR(NE) OPERATOR(And) OPERATOR(Xor) OPERATOR(Or) OPERATOR(LAnd)     \
-      OPERATOR(LOr) OPERATOR(Assign) OPERATOR(Comma)
+      OPERATOR(NE) OPERATOR(Cmp) OPERATOR(And) OPERATOR(Xor) OPERATOR(Or)      \
+      OPERATOR(LAnd) OPERATOR(LOr) OPERATOR(Assign) OPERATOR(Comma)
 
 // All compound assign operators.
 #define CAO_LIST()                                                             \
@@ -146,7 +146,7 @@ namespace clang {
 /// from which they were produced.
 ///
 /// By default, this visitor preorder traverses the AST. If postorder traversal
-/// is needed, the \c shouldTraversePostOrder method needs to be overriden
+/// is needed, the \c shouldTraversePostOrder method needs to be overridden
 /// to return \c true.
 template <typename Derived> class RecursiveASTVisitor {
 public:
@@ -314,6 +314,8 @@ public:
 #undef ATTR_VISITOR_DECLS_ONLY
 
 // ---- Methods on Stmts ----
+
+  Stmt::child_range getStmtChildren(Stmt *S) { return S->children(); }
 
 private:
   template<typename T, typename U>
@@ -986,6 +988,11 @@ DEF_TRAVERSE_TYPE(DependentSizedArrayType, {
     TRY_TO(TraverseStmt(T->getSizeExpr()));
 })
 
+DEF_TRAVERSE_TYPE(DependentAddressSpaceType, {
+  TRY_TO(TraverseStmt(T->getAddrSpaceExpr()));
+  TRY_TO(TraverseType(T->getPointeeType()));
+})
+
 DEF_TRAVERSE_TYPE(DependentSizedExtVectorType, {
   if (T->getSizeExpr())
     TRY_TO(TraverseStmt(T->getSizeExpr()));
@@ -1194,6 +1201,11 @@ DEF_TRAVERSE_TYPELOC(VariableArrayType, {
 DEF_TRAVERSE_TYPELOC(DependentSizedArrayType, {
   TRY_TO(TraverseTypeLoc(TL.getElementLoc()));
   return TraverseArrayTypeLocHelper(TL);
+})
+
+DEF_TRAVERSE_TYPELOC(DependentAddressSpaceType, {
+  TRY_TO(TraverseStmt(TL.getTypePtr()->getAddrSpaceExpr()));
+  TRY_TO(TraverseType(TL.getTypePtr()->getPointeeType()));
 })
 
 // FIXME: order? why not size expr first?
@@ -1688,8 +1700,8 @@ bool RecursiveASTVisitor<Derived>::TraverseTemplateInstantiations(
 // template declarations.
 #define DEF_TRAVERSE_TMPL_DECL(TMPLDECLKIND)                                   \
   DEF_TRAVERSE_DECL(TMPLDECLKIND##TemplateDecl, {                              \
-    TRY_TO(TraverseDecl(D->getTemplatedDecl()));                               \
     TRY_TO(TraverseTemplateParameterListHelper(D->getTemplateParameters()));   \
+    TRY_TO(TraverseDecl(D->getTemplatedDecl()));                               \
                                                                                \
     /* By default, we do not traverse the instantiations of                    \
        class templates since they do not appear in the user code. The          \
@@ -1709,6 +1721,13 @@ bool RecursiveASTVisitor<Derived>::TraverseTemplateInstantiations(
 DEF_TRAVERSE_TMPL_DECL(Class)
 DEF_TRAVERSE_TMPL_DECL(Var)
 DEF_TRAVERSE_TMPL_DECL(Function)
+
+DEF_TRAVERSE_DECL(ConceptDecl, {
+  TRY_TO(TraverseTemplateParameterListHelper(D->getTemplateParameters()));
+  TRY_TO(TraverseStmt(D->getConstraintExpr()));
+  // FIXME: Traverse all the concept specializations (once we implement forming
+  // template-ids with them).
+})
 
 DEF_TRAVERSE_DECL(TemplateTemplateParmDecl, {
   // D is the "T" in something like
@@ -2078,7 +2097,7 @@ DEF_TRAVERSE_DECL(ParmVarDecl, {
       TRY_TO(WalkUpFrom##STMT(S));                                             \
     { CODE; }                                                                  \
     if (ShouldVisitChildren) {                                                 \
-      for (Stmt *SubStmt : S->children()) {                                    \
+      for (Stmt * SubStmt : getDerived().getStmtChildren(S)) {                 \
         TRY_TO_TRAVERSE_OR_ENQUEUE_STMT(SubStmt);                              \
       }                                                                        \
     }                                                                          \
@@ -3097,6 +3116,7 @@ bool RecursiveASTVisitor<Derived>::VisitOMPDependClause(OMPDependClause *C) {
 
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPDeviceClause(OMPDeviceClause *C) {
+  TRY_TO(VisitOMPClauseWithPreInit(C));
   TRY_TO(TraverseStmt(C->getDevice()));
   return true;
 }

@@ -272,7 +272,8 @@ public:
   /// SourceRangeSkipped - This hook is called when a source range is skipped.
   /// \param Range The SourceRange that was skipped. The range begins at the
   /// #if/#else directive and ends after the #endif/#else directive.
-  void SourceRangeSkipped(SourceRange Range) override {}
+  void SourceRangeSkipped(SourceRange Range, SourceLocation EndifLoc) override {
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -658,8 +659,7 @@ static CXErrorCode clang_indexTranslationUnit_Impl(
                                   ? index_callbacks_size : sizeof(CB);
   memcpy(&CB, client_index_callbacks, ClientCBSize);
 
-  auto DataConsumer = std::make_shared<CXIndexDataConsumer>(client_data, CB,
-                                                            index_options, TU);
+  CXIndexDataConsumer DataConsumer(client_data, CB, index_options, TU);
 
   ASTUnit *Unit = cxtu::getASTUnit(TU);
   if (!Unit)
@@ -668,21 +668,22 @@ static CXErrorCode clang_indexTranslationUnit_Impl(
   ASTUnit::ConcurrencyCheck Check(*Unit);
 
   if (const FileEntry *PCHFile = Unit->getPCHFile())
-    DataConsumer->importedPCH(PCHFile);
+    DataConsumer.importedPCH(PCHFile);
 
   FileManager &FileMgr = Unit->getFileManager();
 
   if (Unit->getOriginalSourceFileName().empty())
-    DataConsumer->enteredMainFile(nullptr);
+    DataConsumer.enteredMainFile(nullptr);
   else
-    DataConsumer->enteredMainFile(FileMgr.getFile(Unit->getOriginalSourceFileName()));
+    DataConsumer.enteredMainFile(
+        FileMgr.getFile(Unit->getOriginalSourceFileName()));
 
-  DataConsumer->setASTContext(Unit->getASTContext());
-  DataConsumer->startedTranslationUnit();
+  DataConsumer.setASTContext(Unit->getASTContext());
+  DataConsumer.startedTranslationUnit();
 
-  indexPreprocessingRecord(*Unit, *DataConsumer);
+  indexPreprocessingRecord(*Unit, DataConsumer);
   indexASTUnit(*Unit, DataConsumer, getIndexingOptionsFromCXOptions(index_options));
-  DataConsumer->indexDiagnostics();
+  DataConsumer.indexDiagnostics();
 
   return CXError_Success;
 }
@@ -879,11 +880,6 @@ int clang_indexSourceFileFullArgv(
         TU_options);
   };
 
-  if (getenv("LIBCLANG_NOTHREADS")) {
-    IndexSourceFileImpl();
-    return result;
-  }
-
   llvm::CrashRecoveryContext CRC;
 
   if (!RunSafely(CRC, IndexSourceFileImpl)) {
@@ -932,11 +928,6 @@ int clang_indexTranslationUnit(CXIndexAction idxAction,
         idxAction, client_data, index_callbacks, index_callbacks_size,
         index_options, TU);
   };
-
-  if (getenv("LIBCLANG_NOTHREADS")) {
-    IndexTranslationUnitImpl();
-    return result;
-  }
 
   llvm::CrashRecoveryContext CRC;
 

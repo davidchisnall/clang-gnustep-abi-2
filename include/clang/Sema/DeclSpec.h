@@ -38,6 +38,7 @@
 namespace clang {
   class ASTContext;
   class CXXRecordDecl;
+  class ConceptDecl;
   class TypeLoc;
   class LangOptions;
   class IdentifierInfo;
@@ -221,10 +222,13 @@ public:
   unsigned location_size() const { return Builder.getBuffer().second; }
 };
 
-/// \brief Captures information about "declaration specifiers".
+/// \brief Captures information about "decl-specifiers" and also concept
+/// definitions.
 ///
 /// "Declaration specifiers" encompasses storage-class-specifiers,
-/// type-specifiers, type-qualifiers, and function-specifiers.
+/// type-specifiers, type-qualifiers, and function-specifiers. This includes
+/// class and enum definitions whose AST representations must be stored - same
+/// with the expression-operands of decltype.
 class DeclSpec {
 public:
   /// \brief storage-class-specifier
@@ -280,6 +284,7 @@ public:
   static const TST TST_half = clang::TST_half;
   static const TST TST_float = clang::TST_float;
   static const TST TST_double = clang::TST_double;
+  static const TST TST_float16 = clang::TST_Float16;
   static const TST TST_float128 = clang::TST_float128;
   static const TST TST_bool = clang::TST_bool;
   static const TST TST_decimal32 = clang::TST_decimal32;
@@ -325,6 +330,7 @@ public:
     PQ_TypeSpecifier         = 2,
     PQ_TypeQualifier         = 4,
     PQ_FunctionSpecifier     = 8
+    // FIXME: Attributes should be included here.
   };
 
 private:
@@ -360,12 +366,15 @@ private:
   // constexpr-specifier
   unsigned Constexpr_specified : 1;
 
-  // concept-specifier
-  unsigned Concept_specified : 1;
-
   union {
+	// Valid if isTypeRep is true.
     UnionParsedType TypeRep;
+    // If we parsed a concept, class, enum (etc.) defintion or elaborated type
+    // specifier, this stores the AST representation.  This is valid if either
+    // isDeclRep or isConceptSpecified returns true.
     Decl *DeclRep;
+    // If we parsed a typeof(e) or decltype(e) operator, this stores the
+    // expression 'e'.  Valid if isExprRep is true.
     Expr *ExprRep;
   };
 
@@ -392,8 +401,13 @@ private:
       TQ_unalignedLoc;
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc, FS_noreturnLoc;
   SourceLocation FS_forceinlineLoc;
-  SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc, ConceptLoc;
+  SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc;
   SourceLocation TQ_pipeLoc;
+  
+  // Even though 'concept' is not a specifier, we handle it here. This allows us
+  // to reuse infrastructure for diagnosing attributes and invalid
+  // decl-specifiers.
+  SourceLocation ConceptLoc;
 
   WrittenBuiltinSpecs writtenBS;
   void SaveWrittenBuiltinSpecs();
@@ -438,7 +452,6 @@ public:
       FS_noreturn_specified(false),
       Friend_specified(false),
       Constexpr_specified(false),
-      Concept_specified(false),
       Attrs(attrFactory),
       writtenBS(),
       ObjCQualifiers(nullptr) {
@@ -484,7 +497,10 @@ public:
   bool isTypeSpecOwned() const { return TypeSpecOwned; }
   bool isTypeRep() const { return isTypeRep((TST) TypeSpecType); }
   bool isTypeSpecPipe() const { return TypeSpecPipe; }
-
+  bool isDeclRep() const {
+    return isDeclRep((TST)TypeSpecType);
+  }
+  
   ParsedType getRepAsType() const {
     assert(isTypeRep((TST) TypeSpecType) && "DeclSpec does not store a type");
     return TypeRep;
@@ -493,6 +509,19 @@ public:
     assert(isDeclRep((TST) TypeSpecType) && "DeclSpec does not store a decl");
     return DeclRep;
   }
+  // This is a template that should only be instantiated with the type
+  // ConceptDecl.  By making it a template we only require ConceptDecl to be a
+  // complete type where this function is called.
+  template<class ConceptDeclTy = ConceptDecl>
+  ConceptDeclTy *getRepAsConcept() const {
+    static_assert(std::is_same<ConceptDeclTy, ConceptDecl>::value,
+                  "Must only be instantiated with ConceptDecl");
+    assert(isConceptSpecified() && "DeclSpec does not store a concept");
+
+    return cast_or_null<ConceptDeclTy>(DeclRep);
+  }
+
+
   Expr *getRepAsExpr() const {
     assert(isExprRep((TST) TypeSpecType) && "DeclSpec does not store an expr");
     return ExprRep;
@@ -667,6 +696,20 @@ public:
     assert(isDeclRep((TST) TypeSpecType));
     DeclRep = Rep;
   }
+  // This function can only be instantiated with ConceptDecl.  We made it a
+  // template so that ConceptDecl only has to be defined where this is called.
+  template <class ConceptDeclTy = ConceptDecl>
+  void
+  setConceptRep(typename llvm::identity<ConceptDeclTy>::argument_type *Rep) {
+    static_assert(std::is_same<ConceptDeclTy, ConceptDecl>::value,
+                  "Must only be instantiated with ConceptDecl");
+    assert(isConceptSpecified() && "DeclSpec does not store a concept");
+    assert(!DeclRep &&
+           "why is this not null? We expect this function to be called only "
+           "once, and usually right after DeclRep was set to null");
+    DeclRep = Rep;
+  }
+
   void UpdateTypeRep(ParsedType Rep) {
     assert(isTypeRep((TST) TypeSpecType));
     TypeRep = Rep;
@@ -696,8 +739,8 @@ public:
                             unsigned &DiagID);
   bool SetConstexprSpec(SourceLocation Loc, const char *&PrevSpec,
                         unsigned &DiagID);
-  bool SetConceptSpec(SourceLocation Loc, const char *&PrevSpec,
-                      unsigned &DiagID);
+  bool setConceptSpec(SourceLocation Loc, const char *&PrevSpec,
+                      unsigned &DiagID, const PrintingPolicy &P);
 
   bool isFriendSpecified() const { return Friend_specified; }
   SourceLocation getFriendSpecLoc() const { return FriendLoc; }
@@ -708,17 +751,11 @@ public:
   bool isConstexprSpecified() const { return Constexpr_specified; }
   SourceLocation getConstexprSpecLoc() const { return ConstexprLoc; }
 
-  bool isConceptSpecified() const { return Concept_specified; }
-  SourceLocation getConceptSpecLoc() const { return ConceptLoc; }
-
+  bool isConceptSpecified() const { return ConceptLoc.isValid(); }
+  SourceLocation getConceptLoc() const { return ConceptLoc; }
   void ClearConstexprSpec() {
     Constexpr_specified = false;
     ConstexprLoc = SourceLocation();
-  }
-
-  void ClearConceptSpec() {
-    Concept_specified = false;
-    ConceptLoc = SourceLocation();
   }
 
   AttributePool &getAttributePool() const {
@@ -895,6 +932,30 @@ private:
 
 };
 
+/// \brief Describes the kind of unqualified-id parsed.
+enum class UnqualifiedIdKind {
+  /// \brief An identifier.
+  IK_Identifier,
+  /// \brief An overloaded operator name, e.g., operator+.
+  IK_OperatorFunctionId,
+  /// \brief A conversion function name, e.g., operator int.
+  IK_ConversionFunctionId,
+  /// \brief A user-defined literal name, e.g., operator "" _i.
+  IK_LiteralOperatorId,
+  /// \brief A constructor name.
+  IK_ConstructorName,
+  /// \brief A constructor named via a template-id.
+  IK_ConstructorTemplateId,
+  /// \brief A destructor name.
+  IK_DestructorName,
+  /// \brief A template-id, e.g., f<int>.
+  IK_TemplateId,
+  /// \brief An implicit 'self' parameter
+  IK_ImplicitSelfParam,
+  /// \brief A deduction-guide name (a template-name)
+  IK_DeductionGuideName
+};
+
 /// \brief Represents a C++ unqualified-id that has been parsed. 
 class UnqualifiedId {
 private:
@@ -903,28 +964,7 @@ private:
 
 public:
   /// \brief Describes the kind of unqualified-id parsed.
-  enum IdKind {
-    /// \brief An identifier.
-    IK_Identifier,
-    /// \brief An overloaded operator name, e.g., operator+.
-    IK_OperatorFunctionId,
-    /// \brief A conversion function name, e.g., operator int.
-    IK_ConversionFunctionId,
-    /// \brief A user-defined literal name, e.g., operator "" _i.
-    IK_LiteralOperatorId,
-    /// \brief A constructor name.
-    IK_ConstructorName,
-    /// \brief A constructor named via a template-id.
-    IK_ConstructorTemplateId,
-    /// \brief A destructor name.
-    IK_DestructorName,
-    /// \brief A template-id, e.g., f<int>.
-    IK_TemplateId,
-    /// \brief An implicit 'self' parameter
-    IK_ImplicitSelfParam,
-    /// \brief A deduction-guide name (a template-name)
-    IK_DeductionGuideName
-  } Kind;
+  UnqualifiedIdKind Kind;
 
   struct OFI {
     /// \brief The kind of overloaded operator.
@@ -979,13 +1019,14 @@ public:
   
   /// \brief The location of the last token that describes this unqualified-id.
   SourceLocation EndLocation;
-  
-  UnqualifiedId() : Kind(IK_Identifier), Identifier(nullptr) { }
+
+  UnqualifiedId()
+      : Kind(UnqualifiedIdKind::IK_Identifier), Identifier(nullptr) {}
 
   /// \brief Clear out this unqualified-id, setting it to default (invalid) 
   /// state.
   void clear() {
-    Kind = IK_Identifier;
+    Kind = UnqualifiedIdKind::IK_Identifier;
     Identifier = nullptr;
     StartLocation = SourceLocation();
     EndLocation = SourceLocation();
@@ -998,15 +1039,15 @@ public:
   bool isInvalid() const { return !isValid(); }
   
   /// \brief Determine what kind of name we have.
-  IdKind getKind() const { return Kind; }
-  void setKind(IdKind kind) { Kind = kind; } 
+  UnqualifiedIdKind getKind() const { return Kind; }
+  void setKind(UnqualifiedIdKind kind) { Kind = kind; } 
   
   /// \brief Specify that this unqualified-id was parsed as an identifier.
   ///
   /// \param Id the parsed identifier.
   /// \param IdLoc the location of the parsed identifier.
   void setIdentifier(const IdentifierInfo *Id, SourceLocation IdLoc) {
-    Kind = IK_Identifier;
+    Kind = UnqualifiedIdKind::IK_Identifier;
     Identifier = const_cast<IdentifierInfo *>(Id);
     StartLocation = EndLocation = IdLoc;
   }
@@ -1035,7 +1076,7 @@ public:
   void setConversionFunctionId(SourceLocation OperatorLoc, 
                                ParsedType Ty,
                                SourceLocation EndLoc) {
-    Kind = IK_ConversionFunctionId;
+    Kind = UnqualifiedIdKind::IK_ConversionFunctionId;
     StartLocation = OperatorLoc;
     EndLocation = EndLoc;
     ConversionFunctionId = Ty;
@@ -1051,7 +1092,7 @@ public:
   /// \param IdLoc the location of the identifier.
   void setLiteralOperatorId(const IdentifierInfo *Id, SourceLocation OpLoc,
                               SourceLocation IdLoc) {
-    Kind = IK_LiteralOperatorId;
+    Kind = UnqualifiedIdKind::IK_LiteralOperatorId;
     Identifier = const_cast<IdentifierInfo *>(Id);
     StartLocation = OpLoc;
     EndLocation = IdLoc;
@@ -1067,7 +1108,7 @@ public:
   void setConstructorName(ParsedType ClassType, 
                           SourceLocation ClassNameLoc,
                           SourceLocation EndLoc) {
-    Kind = IK_ConstructorName;
+    Kind = UnqualifiedIdKind::IK_ConstructorName;
     StartLocation = ClassNameLoc;
     EndLocation = EndLoc;
     ConstructorName = ClassType;
@@ -1090,7 +1131,7 @@ public:
   void setDestructorName(SourceLocation TildeLoc,
                          ParsedType ClassType,
                          SourceLocation EndLoc) {
-    Kind = IK_DestructorName;
+    Kind = UnqualifiedIdKind::IK_DestructorName;
     StartLocation = TildeLoc;
     EndLocation = EndLoc;
     DestructorName = ClassType;
@@ -1110,7 +1151,7 @@ public:
   /// \param TemplateLoc The location of the parsed template-name.
   void setDeductionGuideName(ParsedTemplateTy Template,
                              SourceLocation TemplateLoc) {
-    Kind = IK_DeductionGuideName;
+    Kind = UnqualifiedIdKind::IK_DeductionGuideName;
     TemplateName = Template;
     StartLocation = EndLocation = TemplateLoc;
   }
@@ -1718,21 +1759,7 @@ enum FunctionDefinitionKind {
   FDK_Deleted
 };
 
-/// \brief Information about one declarator, including the parsed type
-/// information and the identifier.
-///
-/// When the declarator is fully formed, this is turned into the appropriate
-/// Decl object.
-///
-/// Declarators come in two types: normal declarators and abstract declarators.
-/// Abstract declarators are used when parsing types, and don't have an
-/// identifier.  Normal declarators do have ID's.
-///
-/// Instances of this class should be a transient object that lives on the
-/// stack, not objects that are allocated in large quantities on the heap.
-class Declarator {
-public:
-  enum TheContext {
+enum class DeclaratorContext {
     FileContext,         // File scope declaration.
     PrototypeContext,    // Within a function prototype.
     ObjCResultContext,   // An ObjC method result type.
@@ -1754,11 +1781,28 @@ public:
     LambdaExprParameterContext, // Lambda-expression parameter declarator.
     ConversionIdContext, // C++ conversion-type-id.
     TrailingReturnContext, // C++11 trailing-type-specifier.
-    TemplateTypeArgContext, // Template type argument.
+    TrailingReturnVarContext, // C++11 trailing-type-specifier for variable.
+    TemplateArgContext,  // Any template argument (in template argument list).
+    TemplateTypeArgContext, // Template type argument (in default argument).
     AliasDeclContext,    // C++11 alias-declaration.
     AliasTemplateContext // C++11 alias-declaration template.
-  };
+};
 
+
+/// \brief Information about one declarator, including the parsed type
+/// information and the identifier.
+///
+/// When the declarator is fully formed, this is turned into the appropriate
+/// Decl object.
+///
+/// Declarators come in two types: normal declarators and abstract declarators.
+/// Abstract declarators are used when parsing types, and don't have an
+/// identifier.  Normal declarators do have ID's.
+///
+/// Instances of this class should be a transient object that lives on the
+/// stack, not objects that are allocated in large quantities on the heap.
+class Declarator {
+  
 private:
   const DeclSpec &DS;
   CXXScopeSpec SS;
@@ -1766,7 +1810,7 @@ private:
   SourceRange Range;
 
   /// \brief Where we are parsing this declarator.
-  TheContext Context;
+  DeclaratorContext Context;
 
   /// The C++17 structured binding, if any. This is an alternative to a Name.
   DecompositionDeclarator BindingGroup;
@@ -1833,7 +1877,7 @@ private:
   friend struct DeclaratorChunk;
 
 public:
-  Declarator(const DeclSpec &ds, TheContext C)
+  Declarator(const DeclSpec &ds, DeclaratorContext C)
       : DS(ds), Range(ds.getSourceRange()), Context(C),
         InvalidType(DS.getTypeSpecType() == DeclSpec::TST_error),
         GroupingParens(false), FunctionDefinition(FDK_Declaration),
@@ -1871,13 +1915,13 @@ public:
     return BindingGroup;
   }
   
-  TheContext getContext() const { return Context; }
+  DeclaratorContext getContext() const { return Context; }
 
   bool isPrototypeContext() const {
-    return (Context == PrototypeContext ||
-            Context == ObjCParameterContext ||
-            Context == ObjCResultContext ||
-            Context == LambdaExprParameterContext);
+    return (Context == DeclaratorContext::PrototypeContext ||
+            Context == DeclaratorContext::ObjCParameterContext ||
+            Context == DeclaratorContext::ObjCResultContext ||
+            Context == DeclaratorContext::LambdaExprParameterContext);
   }
 
   /// \brief Get the source range that spans this declarator.
@@ -1932,32 +1976,34 @@ public:
   /// parameter lists.
   bool mayOmitIdentifier() const {
     switch (Context) {
-    case FileContext:
-    case KNRTypeListContext:
-    case MemberContext:
-    case BlockContext:
-    case ForContext:
-    case InitStmtContext:
-    case ConditionContext:
+    case DeclaratorContext::FileContext:
+    case DeclaratorContext::KNRTypeListContext:
+    case DeclaratorContext::MemberContext:
+    case DeclaratorContext::BlockContext:
+    case DeclaratorContext::ForContext:
+    case DeclaratorContext::InitStmtContext:
+    case DeclaratorContext::ConditionContext:
       return false;
 
-    case TypeNameContext:
-    case FunctionalCastContext:
-    case AliasDeclContext:
-    case AliasTemplateContext:
-    case PrototypeContext:
-    case LambdaExprParameterContext:
-    case ObjCParameterContext:
-    case ObjCResultContext:
-    case TemplateParamContext:
-    case CXXNewContext:
-    case CXXCatchContext:
-    case ObjCCatchContext:
-    case BlockLiteralContext:
-    case LambdaExprContext:
-    case ConversionIdContext:
-    case TemplateTypeArgContext:
-    case TrailingReturnContext:
+    case DeclaratorContext::TypeNameContext:
+    case DeclaratorContext::FunctionalCastContext:
+    case DeclaratorContext::AliasDeclContext:
+    case DeclaratorContext::AliasTemplateContext:
+    case DeclaratorContext::PrototypeContext:
+    case DeclaratorContext::LambdaExprParameterContext:
+    case DeclaratorContext::ObjCParameterContext:
+    case DeclaratorContext::ObjCResultContext:
+    case DeclaratorContext::TemplateParamContext:
+    case DeclaratorContext::CXXNewContext:
+    case DeclaratorContext::CXXCatchContext:
+    case DeclaratorContext::ObjCCatchContext:
+    case DeclaratorContext::BlockLiteralContext:
+    case DeclaratorContext::LambdaExprContext:
+    case DeclaratorContext::ConversionIdContext:
+    case DeclaratorContext::TemplateArgContext:
+    case DeclaratorContext::TemplateTypeArgContext:
+    case DeclaratorContext::TrailingReturnContext:
+    case DeclaratorContext::TrailingReturnVarContext:
       return true;
     }
     llvm_unreachable("unknown context kind!");
@@ -1968,32 +2014,34 @@ public:
   /// typenames.
   bool mayHaveIdentifier() const {
     switch (Context) {
-    case FileContext:
-    case KNRTypeListContext:
-    case MemberContext:
-    case BlockContext:
-    case ForContext:
-    case InitStmtContext:
-    case ConditionContext:
-    case PrototypeContext:
-    case LambdaExprParameterContext:
-    case TemplateParamContext:
-    case CXXCatchContext:
-    case ObjCCatchContext:
+    case DeclaratorContext::FileContext:
+    case DeclaratorContext::KNRTypeListContext:
+    case DeclaratorContext::MemberContext:
+    case DeclaratorContext::BlockContext:
+    case DeclaratorContext::ForContext:
+    case DeclaratorContext::InitStmtContext:
+    case DeclaratorContext::ConditionContext:
+    case DeclaratorContext::PrototypeContext:
+    case DeclaratorContext::LambdaExprParameterContext:
+    case DeclaratorContext::TemplateParamContext:
+    case DeclaratorContext::CXXCatchContext:
+    case DeclaratorContext::ObjCCatchContext:
       return true;
 
-    case TypeNameContext:
-    case FunctionalCastContext:
-    case CXXNewContext:
-    case AliasDeclContext:
-    case AliasTemplateContext:
-    case ObjCParameterContext:
-    case ObjCResultContext:
-    case BlockLiteralContext:
-    case LambdaExprContext:
-    case ConversionIdContext:
-    case TemplateTypeArgContext:
-    case TrailingReturnContext:
+    case DeclaratorContext::TypeNameContext:
+    case DeclaratorContext::FunctionalCastContext:
+    case DeclaratorContext::CXXNewContext:
+    case DeclaratorContext::AliasDeclContext:
+    case DeclaratorContext::AliasTemplateContext:
+    case DeclaratorContext::ObjCParameterContext:
+    case DeclaratorContext::ObjCResultContext:
+    case DeclaratorContext::BlockLiteralContext:
+    case DeclaratorContext::LambdaExprContext:
+    case DeclaratorContext::ConversionIdContext:
+    case DeclaratorContext::TemplateArgContext:
+    case DeclaratorContext::TemplateTypeArgContext:
+    case DeclaratorContext::TrailingReturnContext:
+    case DeclaratorContext::TrailingReturnVarContext:
       return false;
     }
     llvm_unreachable("unknown context kind!");
@@ -2002,38 +2050,40 @@ public:
   /// Return true if the context permits a C++17 decomposition declarator.
   bool mayHaveDecompositionDeclarator() const {
     switch (Context) {
-    case FileContext:
+    case DeclaratorContext::FileContext:
       // FIXME: It's not clear that the proposal meant to allow file-scope
       // structured bindings, but it does.
-    case BlockContext:
-    case ForContext:
-    case InitStmtContext:
+    case DeclaratorContext::BlockContext:
+    case DeclaratorContext::ForContext:
+    case DeclaratorContext::InitStmtContext:
+    case DeclaratorContext::ConditionContext:
       return true;
 
-    case ConditionContext:
-    case MemberContext:
-    case PrototypeContext:
-    case TemplateParamContext:
+    case DeclaratorContext::MemberContext:
+    case DeclaratorContext::PrototypeContext:
+    case DeclaratorContext::TemplateParamContext:
       // Maybe one day...
       return false;
 
     // These contexts don't allow any kind of non-abstract declarator.
-    case KNRTypeListContext:
-    case TypeNameContext:
-    case FunctionalCastContext:
-    case AliasDeclContext:
-    case AliasTemplateContext:
-    case LambdaExprParameterContext:
-    case ObjCParameterContext:
-    case ObjCResultContext:
-    case CXXNewContext:
-    case CXXCatchContext:
-    case ObjCCatchContext:
-    case BlockLiteralContext:
-    case LambdaExprContext:
-    case ConversionIdContext:
-    case TemplateTypeArgContext:
-    case TrailingReturnContext:
+    case DeclaratorContext::KNRTypeListContext:
+    case DeclaratorContext::TypeNameContext:
+    case DeclaratorContext::FunctionalCastContext:
+    case DeclaratorContext::AliasDeclContext:
+    case DeclaratorContext::AliasTemplateContext:
+    case DeclaratorContext::LambdaExprParameterContext:
+    case DeclaratorContext::ObjCParameterContext:
+    case DeclaratorContext::ObjCResultContext:
+    case DeclaratorContext::CXXNewContext:
+    case DeclaratorContext::CXXCatchContext:
+    case DeclaratorContext::ObjCCatchContext:
+    case DeclaratorContext::BlockLiteralContext:
+    case DeclaratorContext::LambdaExprContext:
+    case DeclaratorContext::ConversionIdContext:
+    case DeclaratorContext::TemplateArgContext:
+    case DeclaratorContext::TemplateTypeArgContext:
+    case DeclaratorContext::TrailingReturnContext:
+    case DeclaratorContext::TrailingReturnVarContext:
       return false;
     }
     llvm_unreachable("unknown context kind!");
@@ -2048,45 +2098,47 @@ public:
       return false;
 
     if (getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_extern &&
-        Context != FileContext)
+        Context != DeclaratorContext::FileContext)
       return false;
 
     // Special names can't have direct initializers.
-    if (Name.getKind() != UnqualifiedId::IK_Identifier)
+    if (Name.getKind() != UnqualifiedIdKind::IK_Identifier)
       return false;
 
     switch (Context) {
-    case FileContext:
-    case BlockContext:
-    case ForContext:
-    case InitStmtContext:
+    case DeclaratorContext::FileContext:
+    case DeclaratorContext::BlockContext:
+    case DeclaratorContext::ForContext:
+    case DeclaratorContext::InitStmtContext:
+    case DeclaratorContext::TrailingReturnVarContext:
       return true;
 
-    case ConditionContext:
+    case DeclaratorContext::ConditionContext:
       // This may not be followed by a direct initializer, but it can't be a
       // function declaration either, and we'd prefer to perform a tentative
       // parse in order to produce the right diagnostic.
       return true;
 
-    case KNRTypeListContext:
-    case MemberContext:
-    case PrototypeContext:
-    case LambdaExprParameterContext:
-    case ObjCParameterContext:
-    case ObjCResultContext:
-    case TemplateParamContext:
-    case CXXCatchContext:
-    case ObjCCatchContext:
-    case TypeNameContext:
-    case FunctionalCastContext: // FIXME
-    case CXXNewContext:
-    case AliasDeclContext:
-    case AliasTemplateContext:
-    case BlockLiteralContext:
-    case LambdaExprContext:
-    case ConversionIdContext:
-    case TemplateTypeArgContext:
-    case TrailingReturnContext:
+    case DeclaratorContext::KNRTypeListContext:
+    case DeclaratorContext::MemberContext:
+    case DeclaratorContext::PrototypeContext:
+    case DeclaratorContext::LambdaExprParameterContext:
+    case DeclaratorContext::ObjCParameterContext:
+    case DeclaratorContext::ObjCResultContext:
+    case DeclaratorContext::TemplateParamContext:
+    case DeclaratorContext::CXXCatchContext:
+    case DeclaratorContext::ObjCCatchContext:
+    case DeclaratorContext::TypeNameContext:
+    case DeclaratorContext::FunctionalCastContext: // FIXME
+    case DeclaratorContext::CXXNewContext:
+    case DeclaratorContext::AliasDeclContext:
+    case DeclaratorContext::AliasTemplateContext:
+    case DeclaratorContext::BlockLiteralContext:
+    case DeclaratorContext::LambdaExprContext:
+    case DeclaratorContext::ConversionIdContext:
+    case DeclaratorContext::TemplateArgContext:
+    case DeclaratorContext::TemplateTypeArgContext:
+    case DeclaratorContext::TrailingReturnContext:
       return false;
     }
     llvm_unreachable("unknown context kind!");
@@ -2102,8 +2154,8 @@ public:
   /// special C++ name (constructor, destructor, etc.), or a structured
   /// binding (which is not exactly a name, but occupies the same position).
   bool hasName() const {
-    return Name.getKind() != UnqualifiedId::IK_Identifier || Name.Identifier ||
-           isDecompositionDeclarator();
+    return Name.getKind() != UnqualifiedIdKind::IK_Identifier ||
+           Name.Identifier || isDecompositionDeclarator();
   }
 
   /// Return whether this declarator is a decomposition declarator.
@@ -2112,7 +2164,7 @@ public:
   }
 
   IdentifierInfo *getIdentifier() const { 
-    if (Name.getKind() == UnqualifiedId::IK_Identifier)
+    if (Name.getKind() == UnqualifiedIdKind::IK_Identifier)
       return Name.Identifier;
     
     return nullptr;
@@ -2270,34 +2322,77 @@ public:
       return false;
 
     switch (Context) {
-    case FileContext:
-    case MemberContext:
-    case BlockContext:
-    case ForContext:
-    case InitStmtContext:
+    case DeclaratorContext::FileContext:
+    case DeclaratorContext::MemberContext:
+    case DeclaratorContext::BlockContext:
+    case DeclaratorContext::ForContext:
+    case DeclaratorContext::InitStmtContext:
       return true;
 
-    case ConditionContext:
-    case KNRTypeListContext:
-    case TypeNameContext:
-    case FunctionalCastContext:
-    case AliasDeclContext:
-    case AliasTemplateContext:
-    case PrototypeContext:
-    case LambdaExprParameterContext:
-    case ObjCParameterContext:
-    case ObjCResultContext:
-    case TemplateParamContext:
-    case CXXNewContext:
-    case CXXCatchContext:
-    case ObjCCatchContext:
-    case BlockLiteralContext:
-    case LambdaExprContext:
-    case ConversionIdContext:
-    case TemplateTypeArgContext:
-    case TrailingReturnContext:
+    case DeclaratorContext::ConditionContext:
+    case DeclaratorContext::KNRTypeListContext:
+    case DeclaratorContext::TypeNameContext:
+    case DeclaratorContext::FunctionalCastContext:
+    case DeclaratorContext::AliasDeclContext:
+    case DeclaratorContext::AliasTemplateContext:
+    case DeclaratorContext::PrototypeContext:
+    case DeclaratorContext::LambdaExprParameterContext:
+    case DeclaratorContext::ObjCParameterContext:
+    case DeclaratorContext::ObjCResultContext:
+    case DeclaratorContext::TemplateParamContext:
+    case DeclaratorContext::CXXNewContext:
+    case DeclaratorContext::CXXCatchContext:
+    case DeclaratorContext::ObjCCatchContext:
+    case DeclaratorContext::BlockLiteralContext:
+    case DeclaratorContext::LambdaExprContext:
+    case DeclaratorContext::ConversionIdContext:
+    case DeclaratorContext::TemplateArgContext:
+    case DeclaratorContext::TemplateTypeArgContext:
+    case DeclaratorContext::TrailingReturnContext:
+    case DeclaratorContext::TrailingReturnVarContext:
       return false;
     }
+    llvm_unreachable("unknown context kind!");
+  }
+
+  /// Determine whether this declaration appears in a context where an
+  /// expression could appear.
+  bool isExpressionContext() const {
+    switch (Context) {
+    case DeclaratorContext::FileContext:
+    case DeclaratorContext::KNRTypeListContext:
+    case DeclaratorContext::MemberContext:
+
+    // FIXME: sizeof(...) permits an expression.
+    case DeclaratorContext::TypeNameContext: 
+    
+    case DeclaratorContext::FunctionalCastContext:
+    case DeclaratorContext::AliasDeclContext:
+    case DeclaratorContext::AliasTemplateContext:
+    case DeclaratorContext::PrototypeContext:
+    case DeclaratorContext::LambdaExprParameterContext:
+    case DeclaratorContext::ObjCParameterContext:
+    case DeclaratorContext::ObjCResultContext:
+    case DeclaratorContext::TemplateParamContext:
+    case DeclaratorContext::CXXNewContext:
+    case DeclaratorContext::CXXCatchContext:
+    case DeclaratorContext::ObjCCatchContext:
+    case DeclaratorContext::BlockLiteralContext:
+    case DeclaratorContext::LambdaExprContext:
+    case DeclaratorContext::ConversionIdContext:
+    case DeclaratorContext::TrailingReturnContext:
+    case DeclaratorContext::TrailingReturnVarContext:
+    case DeclaratorContext::TemplateTypeArgContext:
+      return false;
+
+    case DeclaratorContext::BlockContext:
+    case DeclaratorContext::ForContext:
+    case DeclaratorContext::InitStmtContext:
+    case DeclaratorContext::ConditionContext:
+    case DeclaratorContext::TemplateArgContext:
+      return true;
+    }
+
     llvm_unreachable("unknown context kind!");
   }
   
@@ -2407,7 +2502,8 @@ public:
 
   /// Returns true if this declares a real member and not a friend.
   bool isFirstDeclarationOfMember() {
-    return getContext() == MemberContext && !getDeclSpec().isFriendSpecified();
+    return getContext() == DeclaratorContext::MemberContext &&
+           !getDeclSpec().isFriendSpecified();
   }
 
   /// Returns true if this declares a static member.  This cannot be called on a
@@ -2428,7 +2524,8 @@ struct FieldDeclarator {
   Declarator D;
   Expr *BitfieldSize;
   explicit FieldDeclarator(const DeclSpec &DS)
-    : D(DS, Declarator::MemberContext), BitfieldSize(nullptr) { }
+      : D(DS, DeclaratorContext::MemberContext),
+        BitfieldSize(nullptr) {}
 };
 
 /// \brief Represents a C++11 virt-specifier-seq.

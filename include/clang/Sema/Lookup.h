@@ -1,4 +1,4 @@
-//===--- Lookup.h - Classes for name lookup ---------------------*- C++ -*-===//
+//===- Lookup.h - Classes for name lookup -----------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -15,12 +15,27 @@
 #ifndef LLVM_CLANG_SEMA_LOOKUP_H
 #define LLVM_CLANG_SEMA_LOOKUP_H
 
+#include "clang/AST/Decl.h"
+#include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclCXX.h"
+#include "clang/AST/DeclarationName.h"
+#include "clang/AST/Type.h"
+#include "clang/AST/UnresolvedSet.h"
+#include "clang/Basic/LLVM.h"
+#include "clang/Basic/LangOptions.h"
+#include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/Specifiers.h"
 #include "clang/Sema/Sema.h"
-
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
+#include <cassert>
+#include <utility>
 
 namespace clang {
+
+class CXXBasePaths;
 
 /// @brief Represents the results of name lookup.
 ///
@@ -126,24 +141,15 @@ public:
     Temporary
   };
 
-  typedef UnresolvedSetImpl::iterator iterator;
+  using iterator = UnresolvedSetImpl::iterator;
 
   LookupResult(Sema &SemaRef, const DeclarationNameInfo &NameInfo,
                Sema::LookupNameKind LookupKind,
                Sema::RedeclarationKind Redecl = Sema::NotForRedeclaration)
-    : ResultKind(NotFound),
-      Paths(nullptr),
-      NamingClass(nullptr),
-      SemaPtr(&SemaRef),
-      NameInfo(NameInfo),
-      LookupKind(LookupKind),
-      IDNS(0),
-      Redecl(Redecl != Sema::NotForRedeclaration),
-      HideTags(true),
-      Diagnose(Redecl == Sema::NotForRedeclaration),
-      AllowHidden(false),
-      Shadowed(false)
-  {
+      : SemaPtr(&SemaRef), NameInfo(NameInfo), LookupKind(LookupKind),
+        Redecl(Redecl != Sema::NotForRedeclaration),
+        ExternalRedecl(Redecl == Sema::ForExternalRedeclaration),
+        Diagnose(Redecl == Sema::NotForRedeclaration) {
     configure();
   }
 
@@ -153,19 +159,10 @@ public:
   LookupResult(Sema &SemaRef, DeclarationName Name,
                SourceLocation NameLoc, Sema::LookupNameKind LookupKind,
                Sema::RedeclarationKind Redecl = Sema::NotForRedeclaration)
-    : ResultKind(NotFound),
-      Paths(nullptr),
-      NamingClass(nullptr),
-      SemaPtr(&SemaRef),
-      NameInfo(Name, NameLoc),
-      LookupKind(LookupKind),
-      IDNS(0),
-      Redecl(Redecl != Sema::NotForRedeclaration),
-      HideTags(true),
-      Diagnose(Redecl == Sema::NotForRedeclaration),
-      AllowHidden(false),
-      Shadowed(false)
-  {
+      : SemaPtr(&SemaRef), NameInfo(Name, NameLoc), LookupKind(LookupKind),
+        Redecl(Redecl != Sema::NotForRedeclaration),
+        ExternalRedecl(Redecl == Sema::ForExternalRedeclaration),
+        Diagnose(Redecl == Sema::NotForRedeclaration) {
     configure();
   }
 
@@ -173,19 +170,10 @@ public:
   /// using the information from another result.  Diagnostics are always
   /// disabled.
   LookupResult(TemporaryToken _, const LookupResult &Other)
-    : ResultKind(NotFound),
-      Paths(nullptr),
-      NamingClass(nullptr),
-      SemaPtr(Other.SemaPtr),
-      NameInfo(Other.NameInfo),
-      LookupKind(Other.LookupKind),
-      IDNS(Other.IDNS),
-      Redecl(Other.Redecl),
-      HideTags(Other.HideTags),
-      Diagnose(false),
-      AllowHidden(Other.AllowHidden),
-      Shadowed(false)
-  {}
+      : SemaPtr(Other.SemaPtr), NameInfo(Other.NameInfo),
+        LookupKind(Other.LookupKind), IDNS(Other.IDNS), Redecl(Other.Redecl),
+        ExternalRedecl(Other.ExternalRedecl), HideTags(Other.HideTags),
+        AllowHidden(Other.AllowHidden) {}
 
   // FIXME: Remove these deleted methods once the default build includes
   // -Wdeprecated.
@@ -201,13 +189,16 @@ public:
         SemaPtr(std::move(Other.SemaPtr)), NameInfo(std::move(Other.NameInfo)),
         NameContextRange(std::move(Other.NameContextRange)),
         LookupKind(std::move(Other.LookupKind)), IDNS(std::move(Other.IDNS)),
-        Redecl(std::move(Other.Redecl)), HideTags(std::move(Other.HideTags)),
+        Redecl(std::move(Other.Redecl)),
+        ExternalRedecl(std::move(Other.ExternalRedecl)),
+        HideTags(std::move(Other.HideTags)),
         Diagnose(std::move(Other.Diagnose)),
         AllowHidden(std::move(Other.AllowHidden)),
         Shadowed(std::move(Other.Shadowed)) {
     Other.Paths = nullptr;
     Other.Diagnose = false;
   }
+
   LookupResult &operator=(LookupResult &&Other) {
     ResultKind = std::move(Other.ResultKind);
     Ambiguity = std::move(Other.Ambiguity);
@@ -221,6 +212,7 @@ public:
     LookupKind = std::move(Other.LookupKind);
     IDNS = std::move(Other.IDNS);
     Redecl = std::move(Other.Redecl);
+    ExternalRedecl = std::move(Other.ExternalRedecl);
     HideTags = std::move(Other.HideTags);
     Diagnose = std::move(Other.Diagnose);
     AllowHidden = std::move(Other.AllowHidden);
@@ -265,6 +257,17 @@ public:
     return Redecl;
   }
 
+  /// True if this lookup is just looking for an existing declaration to link
+  /// against a declaration with external linkage.
+  bool isForExternalRedeclaration() const {
+    return ExternalRedecl;
+  }
+
+  Sema::RedeclarationKind redeclarationKind() const {
+    return ExternalRedecl ? Sema::ForExternalRedeclaration :
+           Redecl ? Sema::ForVisibleRedeclaration : Sema::NotForRedeclaration;
+  }
+
   /// \brief Specify whether hidden declarations are visible, e.g.,
   /// for recovery reasons.
   void setAllowHidden(bool AH) {
@@ -275,7 +278,7 @@ public:
   /// declarations, such as those in modules that have not yet been imported.
   bool isHiddenDeclarationVisible(NamedDecl *ND) const {
     return AllowHidden ||
-           (isForRedeclaration() && ND->hasExternalFormalLinkage());
+           (isForExternalRedeclaration() && ND->isExternallyDeclarable());
   }
 
   /// Sets whether tag declarations should be hidden by non-tag
@@ -556,7 +559,8 @@ public:
 
   /// \brief Change this lookup's redeclaration kind.
   void setRedeclarationKind(Sema::RedeclarationKind RK) {
-    Redecl = RK;
+    Redecl = (RK != Sema::NotForRedeclaration);
+    ExternalRedecl = (RK == Sema::ForExternalRedeclaration);
     configure();
   }
 
@@ -600,15 +604,14 @@ public:
   /// filtering out results.  The results returned are possibly
   /// sugared.
   class Filter {
+    friend class LookupResult;
+
     LookupResult &Results;
     LookupResult::iterator I;
-    bool Changed;
-    bool CalledDone;
+    bool Changed = false;
+    bool CalledDone = false;
     
-    friend class LookupResult;
-    Filter(LookupResult &Results)
-      : Results(Results), I(Results.begin()), Changed(false), CalledDone(false)
-    {}
+    Filter(LookupResult &Results) : Results(Results), I(Results.begin()) {}
 
   public:
     Filter(Filter &&F)
@@ -616,6 +619,7 @@ public:
           CalledDone(F.CalledDone) {
       F.CalledDone = true;
     }
+
     ~Filter() {
       assert(CalledDone &&
              "LookupResult::Filter destroyed without done() call");
@@ -704,11 +708,11 @@ private:
   static void deletePaths(CXXBasePaths *);
 
   // Results.
-  LookupResultKind ResultKind;
+  LookupResultKind ResultKind = NotFound;
   AmbiguityKind Ambiguity; // ill-defined unless ambiguous
   UnresolvedSet<8> Decls;
-  CXXBasePaths *Paths;
-  CXXRecordDecl *NamingClass;
+  CXXBasePaths *Paths = nullptr;
+  CXXRecordDecl *NamingClass = nullptr;
   QualType BaseObjectType;
 
   // Parameters.
@@ -716,23 +720,24 @@ private:
   DeclarationNameInfo NameInfo;
   SourceRange NameContextRange;
   Sema::LookupNameKind LookupKind;
-  unsigned IDNS; // set by configure()
+  unsigned IDNS = 0; // set by configure()
 
   bool Redecl;
+  bool ExternalRedecl;
 
   /// \brief True if tag declarations should be hidden if non-tags
   ///   are present
-  bool HideTags;
+  bool HideTags = true;
 
-  bool Diagnose;
+  bool Diagnose = false;
 
   /// \brief True if we should allow hidden declarations to be 'visible'.
-  bool AllowHidden;
+  bool AllowHidden = false;
 
   /// \brief True if the found declarations were shadowed by some other
   /// declaration that we skipped. This only happens when \c LookupKind
   /// is \c LookupRedeclarationWithLinkage.
-  bool Shadowed;
+  bool Shadowed = false;
 };
 
 /// \brief Consumes visible declarations found when searching for
@@ -765,6 +770,12 @@ public:
   /// class of the context we searched.
   virtual void FoundDecl(NamedDecl *ND, NamedDecl *Hiding, DeclContext *Ctx,
                          bool InBaseClass) = 0;
+
+  /// \brief Callback to inform the client that Sema entered into a new context
+  /// to find a visible declaration.
+  //
+  /// \param Ctx the context which Sema entered.
+  virtual void EnteredContext(DeclContext *Ctx) {}
 };
 
 /// \brief A class for storing results from argument-dependent lookup.
@@ -788,13 +799,13 @@ public:
     Decls.erase(cast<NamedDecl>(D->getCanonicalDecl()));
   }
 
-  typedef llvm::mapped_iterator<decltype(Decls)::iterator, select_second>
-      iterator;
+  using iterator =
+      llvm::mapped_iterator<decltype(Decls)::iterator, select_second>;
 
   iterator begin() { return iterator(Decls.begin(), select_second()); }
   iterator end() { return iterator(Decls.end(), select_second()); }
 };
 
-}
+} // namespace clang
 
-#endif
+#endif // LLVM_CLANG_SEMA_LOOKUP_H

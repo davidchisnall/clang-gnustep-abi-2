@@ -8,14 +8,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "CommonArgs.h"
-#include "InputInfo.h"
-#include "Hexagon.h"
 #include "Arch/AArch64.h"
 #include "Arch/ARM.h"
 #include "Arch/Mips.h"
 #include "Arch/PPC.h"
 #include "Arch/SystemZ.h"
 #include "Arch/X86.h"
+#include "Hexagon.h"
+#include "InputInfo.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/ObjCRuntime.h"
@@ -31,6 +31,7 @@
 #include "clang/Driver/SanitizerArgs.h"
 #include "clang/Driver/ToolChain.h"
 #include "clang/Driver/Util.h"
+#include "clang/Driver/XRayArgs.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
@@ -41,6 +42,7 @@
 #include "llvm/Option/Option.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compression.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Host.h"
@@ -363,17 +365,14 @@ unsigned tools::getLTOParallelism(const ArgList &Args, const Driver &D) {
   return Parallelism;
 }
 
-// CloudABI and WebAssembly use -ffunction-sections and -fdata-sections by
-// default.
+// CloudABI uses -ffunction-sections and -fdata-sections by default.
 bool tools::isUseSeparateSections(const llvm::Triple &Triple) {
-  return Triple.getOS() == llvm::Triple::CloudABI ||
-         Triple.getArch() == llvm::Triple::wasm32 ||
-         Triple.getArch() == llvm::Triple::wasm64;
+  return Triple.getOS() == llvm::Triple::CloudABI;
 }
 
 void tools::AddGoldPlugin(const ToolChain &ToolChain, const ArgList &Args,
-                          ArgStringList &CmdArgs, bool IsThinLTO,
-                          const Driver &D) {
+                          ArgStringList &CmdArgs, const InputInfo &Output,
+                          const InputInfo &Input, bool IsThinLTO) {
   // Tell the linker to load the plugin. This has to come before AddLinkerInputs
   // as gold requires -plugin to come before any -plugin-opt that -Wl might
   // forward.
@@ -418,9 +417,9 @@ void tools::AddGoldPlugin(const ToolChain &ToolChain, const ArgList &Args,
   if (IsThinLTO)
     CmdArgs.push_back("-plugin-opt=thinlto");
 
-  if (unsigned Parallelism = getLTOParallelism(Args, D))
-    CmdArgs.push_back(Args.MakeArgString(Twine("-plugin-opt=jobs=") +
-                                         llvm::to_string(Parallelism)));
+  if (unsigned Parallelism = getLTOParallelism(Args, ToolChain.getDriver()))
+    CmdArgs.push_back(
+        Args.MakeArgString("-plugin-opt=jobs=" + Twine(Parallelism)));
 
   // If an explicit debugger tuning argument appeared, pass it along.
   if (Arg *A = Args.getLastArg(options::OPT_gTune_Group,
@@ -449,15 +448,33 @@ void tools::AddGoldPlugin(const ToolChain &ToolChain, const ArgList &Args,
   if (Arg *A = getLastProfileSampleUseArg(Args)) {
     StringRef FName = A->getValue();
     if (!llvm::sys::fs::exists(FName))
-      D.Diag(diag::err_drv_no_such_file) << FName;
+      ToolChain.getDriver().Diag(diag::err_drv_no_such_file) << FName;
     else
       CmdArgs.push_back(
           Args.MakeArgString(Twine("-plugin-opt=sample-profile=") + FName));
   }
+
+  // Need this flag to turn on new pass manager via Gold plugin.
+  if (Args.hasFlag(options::OPT_fexperimental_new_pass_manager,
+                   options::OPT_fno_experimental_new_pass_manager,
+                   /* Default */ ENABLE_EXPERIMENTAL_NEW_PASS_MANAGER)) {
+    CmdArgs.push_back("-plugin-opt=new-pass-manager");
+  }
+
+  // Setup statistics file output.
+  SmallString<128> StatsFile =
+      getStatsFileName(Args, Output, Input, ToolChain.getDriver());
+  if (!StatsFile.empty())
+    CmdArgs.push_back(
+        Args.MakeArgString(Twine("-plugin-opt=stats-file=") + StatsFile));
 }
 
 void tools::addArchSpecificRPath(const ToolChain &TC, const ArgList &Args,
                                  ArgStringList &CmdArgs) {
+  if (!Args.hasFlag(options::OPT_frtlib_add_rpath,
+                    options::OPT_fno_rtlib_add_rpath, false))
+    return;
+
   std::string CandidateRPath = TC.getArchSpecificLibPath();
   if (TC.getVFS().exists(CandidateRPath)) {
     CmdArgs.push_back("-rpath");
@@ -503,9 +520,9 @@ static void addSanitizerRuntime(const ToolChain &TC, const ArgList &Args,
                                 bool IsShared, bool IsWhole) {
   // Wrap any static runtimes that must be forced into executable in
   // whole-archive.
-  if (IsWhole) CmdArgs.push_back("-whole-archive");
+  if (IsWhole) CmdArgs.push_back("--whole-archive");
   CmdArgs.push_back(TC.getCompilerRTArgString(Args, Sanitizer, IsShared));
-  if (IsWhole) CmdArgs.push_back("-no-whole-archive");
+  if (IsWhole) CmdArgs.push_back("--no-whole-archive");
 
   if (IsShared) {
     addArchSpecificRPath(TC, Args, CmdArgs);
@@ -517,6 +534,10 @@ static void addSanitizerRuntime(const ToolChain &TC, const ArgList &Args,
 static bool addSanitizerDynamicList(const ToolChain &TC, const ArgList &Args,
                                     ArgStringList &CmdArgs,
                                     StringRef Sanitizer) {
+  // Solaris ld defaults to --export-dynamic behaviour but doesn't support
+  // the option, so don't try to pass it.
+  if (TC.getTriple().getOS() == llvm::Triple::Solaris)
+    return true;
   SmallString<128> SanRT(TC.getCompilerRT(Args, Sanitizer));
   if (llvm::sys::fs::exists(SanRT + ".syms")) {
     CmdArgs.push_back(Args.MakeArgString("--dynamic-list=" + SanRT + ".syms"));
@@ -533,14 +554,20 @@ void tools::linkSanitizerRuntimeDeps(const ToolChain &TC,
   // There's no libpthread or librt on RTEMS.
   if (TC.getTriple().getOS() != llvm::Triple::RTEMS) {
     CmdArgs.push_back("-lpthread");
-    CmdArgs.push_back("-lrt");
+    if (TC.getTriple().getOS() != llvm::Triple::OpenBSD)
+      CmdArgs.push_back("-lrt");
   }
   CmdArgs.push_back("-lm");
-  // There's no libdl on FreeBSD or RTEMS.
+  // There's no libdl on all OSes.
   if (TC.getTriple().getOS() != llvm::Triple::FreeBSD &&
       TC.getTriple().getOS() != llvm::Triple::NetBSD &&
+      TC.getTriple().getOS() != llvm::Triple::OpenBSD &&
       TC.getTriple().getOS() != llvm::Triple::RTEMS)
     CmdArgs.push_back("-ldl");
+  // Required for backtrace on some OSes
+  if (TC.getTriple().getOS() == llvm::Triple::NetBSD ||
+      TC.getTriple().getOS() == llvm::Triple::FreeBSD)
+    CmdArgs.push_back("-lexecinfo");
 }
 
 static void
@@ -552,8 +579,23 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
                          SmallVectorImpl<StringRef> &RequiredSymbols) {
   const SanitizerArgs &SanArgs = TC.getSanitizerArgs();
   // Collect shared runtimes.
-  if (SanArgs.needsAsanRt() && SanArgs.needsSharedAsanRt()) {
-    SharedRuntimes.push_back("asan");
+  if (SanArgs.needsSharedRt()) {
+    if (SanArgs.needsAsanRt()) {
+      SharedRuntimes.push_back("asan");
+      if (!Args.hasArg(options::OPT_shared) && !TC.getTriple().isAndroid())
+        HelperStaticRuntimes.push_back("asan-preinit");
+    }
+    if (SanArgs.needsUbsanRt()) {
+      if (SanArgs.requiresMinimalRuntime()) {
+        SharedRuntimes.push_back("ubsan_minimal");
+      } else {
+        SharedRuntimes.push_back("ubsan_standalone");
+      }
+    }
+    if (SanArgs.needsScudoRt())
+      SharedRuntimes.push_back("scudo");
+    if (SanArgs.needsHwasanRt())
+      SharedRuntimes.push_back("hwasan");
   }
 
   // The stats_client library is also statically linked into DSOs.
@@ -561,18 +603,20 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     StaticRuntimes.push_back("stats_client");
 
   // Collect static runtimes.
-  if (Args.hasArg(options::OPT_shared) || TC.getTriple().isAndroid()) {
-    // Don't link static runtimes into DSOs or if compiling for Android.
+  if (Args.hasArg(options::OPT_shared) || SanArgs.needsSharedRt()) {
+    // Don't link static runtimes into DSOs or if -shared-libasan.
     return;
   }
   if (SanArgs.needsAsanRt()) {
-    if (SanArgs.needsSharedAsanRt()) {
-      HelperStaticRuntimes.push_back("asan-preinit");
-    } else {
-      StaticRuntimes.push_back("asan");
-      if (SanArgs.linkCXXRuntimes())
-        StaticRuntimes.push_back("asan_cxx");
-    }
+    StaticRuntimes.push_back("asan");
+    if (SanArgs.linkCXXRuntimes())
+      StaticRuntimes.push_back("asan_cxx");
+  }
+
+  if (SanArgs.needsHwasanRt()) {
+    StaticRuntimes.push_back("hwasan");
+    if (SanArgs.linkCXXRuntimes())
+      StaticRuntimes.push_back("hwasan_cxx");
   }
   if (SanArgs.needsDfsanRt())
     StaticRuntimes.push_back("dfsan");
@@ -614,6 +658,11 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
   }
   if (SanArgs.needsEsanRt())
     StaticRuntimes.push_back("esan");
+  if (SanArgs.needsScudoRt()) {
+    StaticRuntimes.push_back("scudo");
+    if (SanArgs.linkCXXRuntimes())
+      StaticRuntimes.push_back("scudo_cxx");
+  }
 }
 
 // Should be called before we add system libraries (C++ ABI, libstdc++/libc++,
@@ -655,13 +704,42 @@ bool tools::addSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
   // If there is a static runtime with no dynamic list, force all the symbols
   // to be dynamic to be sure we export sanitizer interface functions.
   if (AddExportDynamic)
-    CmdArgs.push_back("-export-dynamic");
+    CmdArgs.push_back("--export-dynamic");
 
   const SanitizerArgs &SanArgs = TC.getSanitizerArgs();
   if (SanArgs.hasCrossDsoCfi() && !AddExportDynamic)
     CmdArgs.push_back("-export-dynamic-symbol=__cfi_check");
 
   return !StaticRuntimes.empty() || !NonWholeStaticRuntimes.empty();
+}
+
+bool tools::addXRayRuntime(const ToolChain&TC, const ArgList &Args, ArgStringList &CmdArgs) {
+  if (Args.hasArg(options::OPT_shared))
+    return false;
+
+  if (TC.getXRayArgs().needsXRayRt()) {
+    CmdArgs.push_back("-whole-archive");
+    CmdArgs.push_back(TC.getCompilerRTArgString(Args, "xray", false));
+    for (const auto &Mode : TC.getXRayArgs().modeList())
+      CmdArgs.push_back(TC.getCompilerRTArgString(Args, Mode, false));
+    CmdArgs.push_back("-no-whole-archive");
+    return true;
+  }
+
+  return false;
+}
+
+void tools::linkXRayRuntimeDeps(const ToolChain &TC, ArgStringList &CmdArgs) {
+  CmdArgs.push_back("--no-as-needed");
+  CmdArgs.push_back("-lpthread");
+  if (TC.getTriple().getOS() != llvm::Triple::OpenBSD)
+    CmdArgs.push_back("-lrt");
+  CmdArgs.push_back("-lm");
+
+  if (TC.getTriple().getOS() != llvm::Triple::FreeBSD &&
+      TC.getTriple().getOS() != llvm::Triple::NetBSD &&
+      TC.getTriple().getOS() != llvm::Triple::OpenBSD)
+    CmdArgs.push_back("-ldl");
 }
 
 bool tools::areOptimizationsEnabled(const ArgList &Args) {
@@ -703,7 +781,8 @@ void tools::SplitDebugInfo(const ToolChain &TC, Compilation &C, const Tool &T,
   ExtractArgs.push_back(Output.getFilename());
   ExtractArgs.push_back(OutFile);
 
-  const char *Exec = Args.MakeArgString(TC.GetProgramPath("objcopy"));
+  const char *Exec =
+      Args.MakeArgString(TC.GetProgramPath(CLANG_DEFAULT_OBJCOPY));
   InputInfo II(types::TY_Object, Output.getFilename(), Output.getFilename());
 
   // First extract the dwo sections.
@@ -822,6 +901,10 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
     }
   }
 
+  // AMDGPU-specific defaults for PIC.
+  if (Triple.getArch() == llvm::Triple::amdgcn)
+    PIC = true;
+
   // The last argument relating to either PIC or PIE wins, and no
   // other argument is used. If the last argument is any flavor of the
   // '-fno-...' arguments, both PIC and PIE are disabled. Any PIE
@@ -927,16 +1010,21 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
     RWPI = true;
   }
 
-  // ROPI and RWPI are not comaptible with PIC or PIE.
+  // ROPI and RWPI are not compatible with PIC or PIE.
   if ((ROPI || RWPI) && (PIC || PIE))
     ToolChain.getDriver().Diag(diag::err_drv_ropi_rwpi_incompatible_with_pic);
 
-  // When targettng MIPS64 with N64, the default is PIC, unless -mno-abicalls is
-  // used.
-  if ((Triple.getArch() == llvm::Triple::mips64 ||
-       Triple.getArch() == llvm::Triple::mips64el) &&
-      Args.hasArg(options::OPT_mno_abicalls))
-    return std::make_tuple(llvm::Reloc::Static, 0U, false);
+  if (Triple.getArch() == llvm::Triple::mips ||
+       Triple.getArch() == llvm::Triple::mipsel ||
+       Triple.getArch() == llvm::Triple::mips64 ||
+       Triple.getArch() == llvm::Triple::mips64el) {
+    // When targettng MIPS with -mno-abicalls, it's always static.
+    if(Args.hasArg(options::OPT_mno_abicalls))
+      return std::make_tuple(llvm::Reloc::Static, 0U, false);
+    // Unlike other architectures, MIPS, even with -fPIC/-mxgot/multigot,
+    // does not use PIC level 2 for historical reasons.
+    IsPICLevelTwo = false;
+  }
 
   if (PIC)
     return std::make_tuple(llvm::Reloc::PIC_, IsPICLevelTwo ? 2U : 1U, PIE);
@@ -950,6 +1038,40 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
     RelocM = llvm::Reloc::RWPI;
 
   return std::make_tuple(RelocM, 0U, false);
+}
+
+// `-falign-functions` indicates that the functions should be aligned to a
+// 16-byte boundary.
+//
+// `-falign-functions=1` is the same as `-fno-align-functions`.
+//
+// The scalar `n` in `-falign-functions=n` must be an integral value between
+// [0, 65536].  If the value is not a power-of-two, it will be rounded up to
+// the nearest power-of-two.
+//
+// If we return `0`, the frontend will default to the backend's preferred
+// alignment.
+//
+// NOTE: icc only allows values between [0, 4096].  icc uses `-falign-functions`
+// to mean `-falign-functions=16`.  GCC defaults to the backend's preferred
+// alignment.  For unaligned functions, we default to the backend's preferred
+// alignment.
+unsigned tools::ParseFunctionAlignment(const ToolChain &TC,
+                                       const ArgList &Args) {
+  const Arg *A = Args.getLastArg(options::OPT_falign_functions,
+                                 options::OPT_falign_functions_EQ,
+                                 options::OPT_fno_align_functions);
+  if (!A || A->getOption().matches(options::OPT_fno_align_functions))
+    return 0;
+
+  if (A->getOption().matches(options::OPT_falign_functions))
+    return 0;
+
+  unsigned Value = 0;
+  if (StringRef(A->getValue()).getAsInteger(10, Value) || Value > 65536)
+    TC.getDriver().Diag(diag::err_drv_invalid_int_value)
+        << A->getAsString(Args) << A->getValue();
+  return Value ? llvm::Log2_32_Ceil(std::min(Value, 65536u)) : Value;
 }
 
 void tools::AddAssemblerKPIC(const ToolChain &ToolChain, const ArgList &Args,
@@ -1011,15 +1133,7 @@ void tools::AddRunTimeLibs(const ToolChain &TC, const Driver &D,
 
   switch (RLT) {
   case ToolChain::RLT_CompilerRT:
-    switch (TC.getTriple().getOS()) {
-    default:
-      llvm_unreachable("unsupported OS");
-    case llvm::Triple::Win32:
-    case llvm::Triple::Linux:
-    case llvm::Triple::Fuchsia:
-      CmdArgs.push_back(TC.getCompilerRTArgString(Args, "builtins"));
-      break;
-    }
+    CmdArgs.push_back(TC.getCompilerRTArgString(Args, "builtins"));
     break;
   case ToolChain::RLT_Libgcc:
     // Make sure libgcc is not used under MSVC environment by default
@@ -1159,4 +1273,28 @@ void tools::AddOpenMPLinkerScript(const ToolChain &TC, Compilation &C,
   }
 
   Lksf << LksBuffer;
+}
+
+SmallString<128> tools::getStatsFileName(const llvm::opt::ArgList &Args,
+                                         const InputInfo &Output,
+                                         const InputInfo &Input,
+                                         const Driver &D) {
+  const Arg *A = Args.getLastArg(options::OPT_save_stats_EQ);
+  if (!A)
+    return {};
+
+  StringRef SaveStats = A->getValue();
+  SmallString<128> StatsFile;
+  if (SaveStats == "obj" && Output.isFilename()) {
+    StatsFile.assign(Output.getFilename());
+    llvm::sys::path::remove_filename(StatsFile);
+  } else if (SaveStats != "cwd") {
+    D.Diag(diag::err_drv_invalid_value) << A->getAsString(Args) << SaveStats;
+    return {};
+  }
+
+  StringRef BaseName = llvm::sys::path::filename(Input.getBaseInput());
+  llvm::sys::path::append(StatsFile, BaseName);
+  llvm::sys::path::replace_extension(StatsFile, "stats");
+  return StatsFile;
 }

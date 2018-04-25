@@ -442,16 +442,17 @@ TEST(VirtualFileSystemTest, BrokenSymlinkRealFSRecursiveIteration) {
   ScopedDir _dd(TestDirectory + "/d/d");
   ScopedDir _ddd(TestDirectory + "/d/d/d");
   ScopedLink _e("no_such_file", TestDirectory + "/e");
-  std::vector<StringRef> Expected = {_b, _bb, _d, _dd, _ddd};
 
-  std::vector<std::string> Contents;
+  std::vector<StringRef> ExpectedBrokenSymlinks = {_a, _ba, _bc, _c, _e};
+  std::vector<StringRef> ExpectedNonBrokenSymlinks = {_b, _bb, _d, _dd, _ddd};
+  std::vector<std::string> VisitedBrokenSymlinks;
+  std::vector<std::string> VisitedNonBrokenSymlinks;
   std::error_code EC;
   for (vfs::recursive_directory_iterator I(*FS, Twine(TestDirectory), EC), E;
        I != E; I.increment(EC)) {
-    // Skip broken symlinks.
     auto EC2 = std::make_error_code(std::errc::no_such_file_or_directory);
     if (EC == EC2) {
-      EC.clear();
+      VisitedBrokenSymlinks.push_back(I->getName());
       continue;
     }
     // For bot debugging.
@@ -467,13 +468,20 @@ TEST(VirtualFileSystemTest, BrokenSymlinkRealFSRecursiveIteration) {
              << "EC message: " << EC2.message() << "\n";
     }
     ASSERT_FALSE(EC);
-    Contents.push_back(I->getName());
+    VisitedNonBrokenSymlinks.push_back(I->getName());
   }
 
-  // Check sorted contents.
-  std::sort(Contents.begin(), Contents.end());
-  EXPECT_EQ(Expected.size(), Contents.size());
-  EXPECT_TRUE(std::equal(Contents.begin(), Contents.end(), Expected.begin()));
+  // Check visited file names.
+  std::sort(VisitedBrokenSymlinks.begin(), VisitedBrokenSymlinks.end());
+  std::sort(VisitedNonBrokenSymlinks.begin(), VisitedNonBrokenSymlinks.end());
+  EXPECT_EQ(ExpectedBrokenSymlinks.size(), VisitedBrokenSymlinks.size());
+  EXPECT_TRUE(std::equal(VisitedBrokenSymlinks.begin(),
+                         VisitedBrokenSymlinks.end(),
+                         ExpectedBrokenSymlinks.begin()));
+  EXPECT_EQ(ExpectedNonBrokenSymlinks.size(), VisitedNonBrokenSymlinks.size());
+  EXPECT_TRUE(std::equal(VisitedNonBrokenSymlinks.begin(),
+                         VisitedNonBrokenSymlinks.end(),
+                         ExpectedNonBrokenSymlinks.begin()));
 }
 #endif
 
@@ -488,8 +496,8 @@ static void checkContents(DirIter I, ArrayRef<StringRef> ExpectedOut) {
   for (DirIter E; !EC && I != E; I.increment(EC))
     InputToCheck.push_back(I->getName());
 
-  std::sort(InputToCheck.begin(), InputToCheck.end());
-  std::sort(Expected.begin(), Expected.end());
+  llvm::sort(InputToCheck.begin(), InputToCheck.end());
+  llvm::sort(Expected.begin(), Expected.end());
   EXPECT_EQ(InputToCheck.size(), Expected.size());
 
   unsigned LastElt = std::min(InputToCheck.size(), Expected.size());
@@ -758,6 +766,88 @@ TEST_F(InMemoryFileSystemTest, WorkingDirectory) {
   NormalizedFS.setCurrentWorkingDirectory("..");
   ASSERT_EQ("/b", ReplaceBackslashes(
                       NormalizedFS.getCurrentWorkingDirectory().get()));
+}
+
+TEST_F(InMemoryFileSystemTest, AddFileWithUser) {
+  FS.addFile("/a/b/c", 0, MemoryBuffer::getMemBuffer("abc"), 0xFEEDFACE);
+  auto Stat = FS.status("/a");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  ASSERT_EQ(0xFEEDFACE, Stat->getUser());
+  Stat = FS.status("/a/b");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  ASSERT_EQ(0xFEEDFACE, Stat->getUser());
+  Stat = FS.status("/a/b/c");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isRegularFile());
+  ASSERT_EQ(sys::fs::perms::all_all, Stat->getPermissions());
+  ASSERT_EQ(0xFEEDFACE, Stat->getUser());
+}
+
+TEST_F(InMemoryFileSystemTest, AddFileWithGroup) {
+  FS.addFile("/a/b/c", 0, MemoryBuffer::getMemBuffer("abc"), None, 0xDABBAD00);
+  auto Stat = FS.status("/a");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  ASSERT_EQ(0xDABBAD00, Stat->getGroup());
+  Stat = FS.status("/a/b");
+  ASSERT_TRUE(Stat->isDirectory());
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_EQ(0xDABBAD00, Stat->getGroup());
+  Stat = FS.status("/a/b/c");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isRegularFile());
+  ASSERT_EQ(sys::fs::perms::all_all, Stat->getPermissions());
+  ASSERT_EQ(0xDABBAD00, Stat->getGroup());
+}
+
+TEST_F(InMemoryFileSystemTest, AddFileWithFileType) {
+  FS.addFile("/a/b/c", 0, MemoryBuffer::getMemBuffer("abc"), None, None,
+             sys::fs::file_type::socket_file);
+  auto Stat = FS.status("/a");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  Stat = FS.status("/a/b");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  Stat = FS.status("/a/b/c");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_EQ(sys::fs::file_type::socket_file, Stat->getType());
+  ASSERT_EQ(sys::fs::perms::all_all, Stat->getPermissions());
+}
+
+TEST_F(InMemoryFileSystemTest, AddFileWithPerms) {
+  FS.addFile("/a/b/c", 0, MemoryBuffer::getMemBuffer("abc"), None, None,
+             None, sys::fs::perms::owner_read | sys::fs::perms::owner_write);
+  auto Stat = FS.status("/a");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  ASSERT_EQ(sys::fs::perms::owner_read | sys::fs::perms::owner_write |
+            sys::fs::perms::owner_exe, Stat->getPermissions());
+  Stat = FS.status("/a/b");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  ASSERT_EQ(sys::fs::perms::owner_read | sys::fs::perms::owner_write |
+            sys::fs::perms::owner_exe, Stat->getPermissions());
+  Stat = FS.status("/a/b/c");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isRegularFile());
+  ASSERT_EQ(sys::fs::perms::owner_read | sys::fs::perms::owner_write,
+            Stat->getPermissions());
+}
+
+TEST_F(InMemoryFileSystemTest, AddDirectoryThenAddChild) {
+  FS.addFile("/a", 0, MemoryBuffer::getMemBuffer(""), /*User=*/None,
+             /*Group=*/None, sys::fs::file_type::directory_file);
+  FS.addFile("/a/b", 0, MemoryBuffer::getMemBuffer("abc"), /*User=*/None,
+             /*Group=*/None, sys::fs::file_type::regular_file);
+  auto Stat = FS.status("/a");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isDirectory());
+  Stat = FS.status("/a/b");
+  ASSERT_FALSE(Stat.getError()) << Stat.getError() << "\n" << FS.toString();
+  ASSERT_TRUE(Stat->isRegularFile());
 }
 
 // NOTE: in the tests below, we use '//root/' as our root directory, since it is
