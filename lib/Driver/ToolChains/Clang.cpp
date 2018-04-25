@@ -4848,6 +4848,13 @@ ObjCRuntime Clang::AddObjCRuntimeArgs(const ArgList &args,
       getToolChain().getDriver().Diag(diag::err_drv_unknown_objc_runtime)
           << value;
     }
+    if ((runtime.getKind() == ObjCRuntime::GNUstep) &&
+        (runtime.getVersion() >= VersionTuple(2, 0)))
+      if (!getToolChain().getTriple().isOSBinFormatELF()) {
+        getToolChain().getDriver().Diag(
+            diag::err_drv_gnustep_objc_runtime_incompatible_binary)
+          << runtime.getVersion().getMajor();
+      }
 
     runtimeArg->render(args, cmdArgs);
     return runtime;
