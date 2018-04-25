@@ -1220,11 +1220,11 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   llvm::Value *GenerateProtocolRef(CodeGenFunction &CGF,
                                    const ObjCProtocolDecl *PD) override {
     auto Name = PD->getNameAsString();
-    auto *Ref = ExistingProtocolRefs[Name];
+    auto *&Ref = ExistingProtocolRefs[Name];
     if (!Ref) {
       auto *&Protocol = ExistingProtocols[Name];
       if (!Protocol)
-        Ref = GenerateProtocolRef(PD);
+        Protocol = GenerateProtocolRef(PD);
       std::string RefName = SymbolForProtocolRef(Name);
       assert(!TheModule.getGlobalVariable(RefName));
       // Emit a reference symbol.
