@@ -8,8 +8,12 @@
 
 
 // Check that we emit a class ref
-// CHECK-NEW: @_OBJC_CLASS_REF_X 
+// CHECK-NEW: @._OBJC_REF_CLASS_X 
 // CHECK-NEW-SAME: section "__objc_class_refs"
+
+// Check that we get a class ref to the defined class.
+// CHECK-NEW: @._OBJC_INIT_CLASS_X = global 
+// CHECK-NEW-SAME* @._OBJC_CLASS_X, section "__objc_classes"
 
 // Check that we emit the section start and end symbols as hidden globals.
 // CHECK-NEW: @__start___objc_selectors = external hidden global i8*
@@ -35,9 +39,6 @@
 // Check that the load function is manually inserted into .ctors.
 // CHECK-NEW: @.objc_ctor = linkonce hidden constant void ()* @.objcv2_load_function, section ".ctors", comdat
 
-// Check that we get a class ref to the defined class.
-// CHECK-NEW: @_OBJC_CLASS_Xinit_ref = linkonce_odr global 
-// CHECK-NEW-SAME* @_OBJC_CLASS_X, section "__objc_classes"
 
 // Make sure that we provide null versions of everything so the __start /
 // __stop symbols work.
@@ -48,7 +49,7 @@
 // CHECK-NEW: @.objc_null_class_alias = linkonce_odr hidden global %5 zeroinitializer, section "__objc_class_aliases", comdat, align 8
 // CHECK-NEW: @.objc_null_constant_string = linkonce_odr hidden global %6 zeroinitializer, section "__objc_constant_string", comdat, align 8
 // Make sure that the null symbols are not going to be removed, even by linking.
-// CHECK-NEW: @llvm.used = appending global [7 x i8*] [i8* bitcast ({ { i8*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }** @_OBJC_CLASS_Xinit_ref to i8*), i8* bitcast (%1* @.objc_null_selector to i8*), i8* bitcast (%2* @.objc_null_category to i8*), i8* bitcast (%3* @.objc_null_protocol to i8*), i8* bitcast (%4* @.objc_null_protocol_ref to i8*), i8* bitcast (%5* @.objc_null_class_alias to i8*), i8* bitcast (%6* @.objc_null_constant_string to i8*)], section "llvm.metadata"
+// CHECK-NEW: @llvm.used = appending global [7 x i8*] [i8* bitcast ({ { i8*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }** @._OBJC_INIT_CLASS_X to i8*), i8* bitcast (%1* @.objc_null_selector to i8*), i8* bitcast (%2* @.objc_null_category to i8*), i8* bitcast (%3* @.objc_null_protocol to i8*), i8* bitcast (%4* @.objc_null_protocol_ref to i8*), i8* bitcast (%5* @.objc_null_class_alias to i8*), i8* bitcast (%6* @.objc_null_constant_string to i8*)], section "llvm.metadata"
 // Make sure that the load function and the reference to it are marked as used.
 // CHECK-NEW: @llvm.compiler.used = appending global [2 x i8*] [i8* bitcast (void ()* @.objcv2_load_function to i8*), i8* bitcast (void ()** @.objc_ctor to i8*)], section "llvm.metadata"
 

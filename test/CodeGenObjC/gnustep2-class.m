@@ -27,10 +27,10 @@
 // CHECK-SAME: @_c_X__clsMeth
 
 // Check that we get a metaclass and that it is not an exposed symbol:
-// CHECK: @_OBJC_METACLASS_X = internal global
+// CHECK: @._OBJC_METACLASS_X = internal global
 
 // Check that we get a reference to the superclass symbol:
-// CHECK: @_OBJC_CLASS_Super = external global i8*
+// CHECK: @._OBJC_CLASS_Super = external global i8*
 
 // Check that we get an ivar list with all three ivars, in the correct order
 // CHECK: private global { i32, i64, [3 x { i8*, i8*, i32*, i32 }] }
@@ -44,12 +44,12 @@
 // CHECK: = internal global { i32, i32, i8*, [2 x { i8*, i8*, i8*, i8*, i8* }] } { i32 2, i32 40, i8* null,
 
 // Check that we get a class structure.
-// CHECK: @_OBJC_CLASS_X = global { { i8*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }*, i8*, i8*, i64, i64, i64, { i32, i64, [3 x { i8*, i8*, i32*, i32 }] }*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, { i32, i32, i8*, [2 x { i8*, i8*, i8*, i8*, i8* }] }* }
-// CHECK-SAME: @_OBJC_METACLASS_X
-// CHECK-SAME: @_OBJC_CLASS_Super
+// CHECK: @._OBJC_CLASS_X = global { { i8*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }*, i8*, i8*, i64, i64, i64, { i32, i64, [3 x { i8*, i8*, i32*, i32 }] }*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, { i32, i32, i8*, [2 x { i8*, i8*, i8*, i8*, i8* }] }* }
+// CHECK-SAME: @._OBJC_METACLASS_X
+// CHECK-SAME: @._OBJC_CLASS_Super
 
 // And check that we get a pointer to it in the right place
-// CHECK: @_OBJC_CLASS_REF_X = global 
-// CHECK-SAME: @_OBJC_CLASS_X
+// CHECK: @._OBJC_REF_CLASS_X = global 
+// CHECK-SAME: @._OBJC_CLASS_X
 // CHECK-SAMEsection "__objc_class_refs"
 

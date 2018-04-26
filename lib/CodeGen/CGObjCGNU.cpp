@@ -916,17 +916,21 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
   /// __start__objc_protocol_refs and __stop__objc_protocol_refs sections
   /// exist.
   bool EmittedProtocolRef = false;
+  /// A flag indicating if we've emitted at least one class.
+  /// If we haven't, then we need to emit an empty protocol, to ensure that the
+  /// __start__objc_classes and __stop__objc_classes sections / exist.
+  bool EmittedClass = false;
   /// Generate the name of a symbol for a reference to a class.  Accesses to
   /// classes should be indirected via this.
   std::string SymbolForClassRef(StringRef Name, bool isWeak) {
     if (isWeak)
-      return (StringRef("_OBJC_CLASS_WEAK_REF_") + Name).str();
+      return (StringRef("._OBJC_WEAK_REF_CLASS_") + Name).str();
     else
-      return (StringRef("_OBJC_CLASS_REF_") + Name).str();
+      return (StringRef("._OBJC_REF_CLASS_") + Name).str();
   }
   /// Generate the name of a class symbol.
   std::string SymbolForClass(StringRef Name) {
-    return (StringRef("_OBJC_CLASS_") + Name).str();
+    return (StringRef("._OBJC_CLASS_") + Name).str();
   }
   void CallRuntimeFunction(CGBuilderTy &B, StringRef FunctionName,
       ArrayRef<llvm::Value*> Args) {
@@ -1433,14 +1437,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       Cat->setSection(CatSection);
       CGM.addUsedGlobal(Cat);
     }
-    for (auto *C : Classes) {
-      auto *Cls = cast<llvm::GlobalVariable>(C->stripPointerCasts());
-      Cls = new llvm::GlobalVariable(TheModule, Cls->getType(),
-          false, llvm::GlobalValue::LinkOnceODRLinkage, Cls, Cls->getName() +
-          "init_ref");
-      Cls->setSection(ClsSection);
-      CGM.addUsedGlobal(Cls);
-    }
     // Add a null value fore each special section so that we can always
     // guarantee that the _start and _stop symbols will exist and be
     // meaningful.
@@ -1459,7 +1455,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     if (Categories.empty())
       createNullGlobal(".objc_null_category", {NULLPtr, NULLPtr,
                     NULLPtr, NULLPtr, NULLPtr, NULLPtr, NULLPtr}, CatSection);
-    if (Classes.empty()) {
+    if (!EmittedClass) {
       createNullGlobal(".objc_null_cls_init_ref", NULLPtr, ClsSection);
       createNullGlobal(".objc_null_class_ref", { NULLPtr, NULLPtr },
           ClsRefSection);
@@ -1578,7 +1574,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // struct objc_property_list *properties
     metaclassFields.add(GeneratePropertyList(OID, classDecl, /*isClassProperty*/true));
 
-    auto *metaclass = metaclassFields.finishAndCreateGlobal("_OBJC_METACLASS_"
+    auto *metaclass = metaclassFields.finishAndCreateGlobal("._OBJC_METACLASS_"
         + className, CGM.getPointerAlign());
 
     auto classFields = builder.beginStruct();
@@ -1779,8 +1775,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     }
     assert(classStruct->getName() == SymbolForClass(className));
 
-    // Add class structure to list to be added to the symtab later
-    Classes.push_back(classStruct);
+    auto classInitRef = new llvm::GlobalVariable(TheModule,
+        classStruct->getType(), false, llvm::GlobalValue::ExternalLinkage,
+        classStruct, "._OBJC_INIT_CLASS_" + className);
+    classInitRef->setSection(ClsSection);
+    CGM.addUsedGlobal(classInitRef);
+
+    EmittedClass = true;
   }
   public:
     CGObjCGNUstep2(CodeGenModule &Mod) : CGObjCGNUstep(Mod, 10, 4, 2) {
