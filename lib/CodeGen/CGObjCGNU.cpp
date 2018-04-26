@@ -499,7 +499,7 @@ protected:
     SmallVector<const ObjCMethodDecl*, 16> RequiredMethods;
     SmallVector<const ObjCMethodDecl*, 16> OptionalMethods;
     for (const auto *I : Methods)
-      if (I->getImplementationControl() == ObjCMethodDecl::Optional)
+      if (I->isOptional())
         OptionalMethods.push_back(I);
       else
         RequiredMethods.push_back(I);
@@ -2852,7 +2852,7 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   SmallVector<const ObjCMethodDecl*, 16> InstanceMethods;
   SmallVector<const ObjCMethodDecl*, 16> OptionalInstanceMethods;
   for (const auto *I : PD->instance_methods())
-    if (I->getImplementationControl() == ObjCMethodDecl::Optional)
+    if (I->isOptional())
       OptionalInstanceMethods.push_back(I);
     else
       InstanceMethods.push_back(I);
@@ -2860,7 +2860,7 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   SmallVector<const ObjCMethodDecl*, 16> ClassMethods;
   SmallVector<const ObjCMethodDecl*, 16> OptionalClassMethods;
   for (const auto *I : PD->class_methods())
-    if (I->getImplementationControl() == ObjCMethodDecl::Optional)
+    if (I->isOptional())
       OptionalClassMethods.push_back(I);
     else
       ClassMethods.push_back(I);
