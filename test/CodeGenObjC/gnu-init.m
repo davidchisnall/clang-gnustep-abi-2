@@ -34,7 +34,7 @@
 // CHECK-NEW: @__stop___objc_constant_string = external hidden global i8*
 
 // Check that we emit the init structure correctly, including in a comdat.
-// CHECK-NEW: @.objc_init = linkonce_odr hidden global %0 { i64 0, i8** @__start___objc_selectors, i8** @__stop___objc_selectors, i8** @__start___objc_classes, i8** @__stop___objc_classes, i8** @__start___objc_class_refs, i8** @__stop___objc_class_refs, i8** @__start___objc_cats, i8** @__stop___objc_cats, i8** @__start___objc_protocols, i8** @__stop___objc_protocols, i8** @__start___objc_protocol_refs, i8** @__stop___objc_protocol_refs, i8** @__start___objc_class_aliases, i8** @__stop___objc_class_aliases, i8** @__start___objc_constant_string, i8** @__stop___objc_constant_string }, comdat
+// CHECK-NEW: @.objc_init = linkonce_odr hidden global { i64, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8**, i8** } { i64 0, i8** @__start___objc_selectors, i8** @__stop___objc_selectors, i8** @__start___objc_classes, i8** @__stop___objc_classes, i8** @__start___objc_class_refs, i8** @__stop___objc_class_refs, i8** @__start___objc_cats, i8** @__stop___objc_cats, i8** @__start___objc_protocols, i8** @__stop___objc_protocols, i8** @__start___objc_protocol_refs, i8** @__stop___objc_protocol_refs, i8** @__start___objc_class_aliases, i8** @__stop___objc_class_aliases, i8** @__start___objc_constant_string, i8** @__stop___objc_constant_string }, comdat, align 8
 
 // Check that the load function is manually inserted into .ctors.
 // CHECK-NEW: @.objc_ctor = linkonce hidden constant void ()* @.objcv2_load_function, section ".ctors", comdat
@@ -42,21 +42,22 @@
 
 // Make sure that we provide null versions of everything so the __start /
 // __stop symbols work.
-// CHECK-NEW: @.objc_null_selector = linkonce_odr hidden global %1 zeroinitializer, section "__objc_selectors", comdat, align 8
-// CHECK-NEW: @.objc_null_category = linkonce_odr hidden global %2 zeroinitializer, section "__objc_cats", comdat, align 8
-// CHECK-NEW: @.objc_null_protocol = linkonce_odr hidden global %3 zeroinitializer, section "__objc_protocols", comdat, align 8
-// CHECK-NEW: @.objc_null_protocol_ref = linkonce_odr hidden global %4 zeroinitializer, section "__objc_protocol_refs", comdat, align 8
-// CHECK-NEW: @.objc_null_class_alias = linkonce_odr hidden global %5 zeroinitializer, section "__objc_class_aliases", comdat, align 8
-// CHECK-NEW: @.objc_null_constant_string = linkonce_odr hidden global %6 zeroinitializer, section "__objc_constant_string", comdat, align 8
+// CHECK-NEW: @.objc_null_selector = linkonce_odr hidden global %0 zeroinitializer, section "__objc_selectors", comdat, align 8
+// CHECK-NEW: @.objc_null_category = linkonce_odr hidden global %1 zeroinitializer, section "__objc_cats", comdat, align 8
+// CHECK-NEW: @.objc_null_protocol = linkonce_odr hidden global %2 zeroinitializer, section "__objc_protocols", comdat, align 8
+// CHECK-NEW: @.objc_null_protocol_ref = linkonce_odr hidden global %3 zeroinitializer, section "__objc_protocol_refs", comdat, align 8
+// CHECK-NEW: @.objc_null_class_alias = linkonce_odr hidden global %4 zeroinitializer, section "__objc_class_aliases", comdat, align 8
+// CHECK-NEW: @.objc_null_constant_string = linkonce_odr hidden global %5 zeroinitializer, section "__objc_constant_string", comdat, align 8
 // Make sure that the null symbols are not going to be removed, even by linking.
-// CHECK-NEW: @llvm.used = appending global [7 x i8*] [i8* bitcast ({ { i8*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }** @._OBJC_INIT_CLASS_X to i8*), i8* bitcast (%1* @.objc_null_selector to i8*), i8* bitcast (%2* @.objc_null_category to i8*), i8* bitcast (%3* @.objc_null_protocol to i8*), i8* bitcast (%4* @.objc_null_protocol_ref to i8*), i8* bitcast (%5* @.objc_null_class_alias to i8*), i8* bitcast (%6* @.objc_null_constant_string to i8*)], section "llvm.metadata"
+// CHECK-NEW: @llvm.used = appending global [7 x i8*] [i8* bitcast ({ { i8*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }*, i8*, i8*, i64, i64, i64, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64, i8* }** @._OBJC_INIT_CLASS_X to i8*), i8* bitcast (%0* @.objc_null_selector to i8*), i8* bitcast (%1* @.objc_null_category to i8*), i8* bitcast (%2* @.objc_null_protocol to i8*), i8* bitcast (%3* @.objc_null_protocol_ref to i8*), i8* bitcast (%4* @.objc_null_class_alias to i8*), i8* bitcast (%5* @.objc_null_constant_string to i8*)], section "llvm.metadata"
 // Make sure that the load function and the reference to it are marked as used.
 // CHECK-NEW: @llvm.compiler.used = appending global [2 x i8*] [i8* bitcast (void ()* @.objcv2_load_function to i8*), i8* bitcast (void ()** @.objc_ctor to i8*)], section "llvm.metadata"
 
 // Check that we emit the load function in a comdat and that it does the right thing.
 // CHECK-NEW: define linkonce_odr hidden void @.objcv2_load_function() comdat {
 // CHECK-NEW-NEXT: entry:
-// CHECK-NEW-NEXT: call void @__objc_load(%0* @.objc_init)
+// CHECK-NEW-NEXT: call void @__objc_load(
+// CHECK-NEW-SAME: @.objc_init
 // CHECK-NEW-NEXT: ret void
 
 // CHECK-OLD: @4 = internal global { i64, i64, i8*, { i64, { i8*, i8* }*, i16, i16, [4 x i8*] }* } { i64 9, i64 32, i8* getelementptr inbounds ([103 x i8], [103 x i8]* @.objc_source_file_name, i64 0, i64 0), { i64, { i8*, i8* }*, i16, i16, [4 x i8*] }* @3 }, align 8

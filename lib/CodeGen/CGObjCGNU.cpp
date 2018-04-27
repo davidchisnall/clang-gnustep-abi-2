@@ -1363,21 +1363,19 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     auto *SelVal = EnforceType(GV, SelectorTy);
     return SelVal;
   }
-  llvm::Constant *GetSectionStart(StringRef Section) {
-    auto *GV = new llvm::GlobalVariable(TheModule, PtrTy,
+  std::pair<llvm::Constant*,llvm::Constant*>
+  GetSectionBounds(StringRef Section) {
+    auto *Start = new llvm::GlobalVariable(TheModule, PtrTy,
         /*isConstant*/false,
         llvm::GlobalValue::ExternalLinkage, nullptr, StringRef("__start_") +
         Section);
-    GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    return GV;
-  }
-  llvm::Constant *GetSectionStop(StringRef Section) {
-    auto *GV = new llvm::GlobalVariable(TheModule, PtrTy,
+    Start->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    auto *Stop = new llvm::GlobalVariable(TheModule, PtrTy,
         /*isConstant*/false,
         llvm::GlobalValue::ExternalLinkage, nullptr, StringRef("__stop_") +
         Section);
-    GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    return GV;
+    Stop->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    return { Start, Stop };
   }
   llvm::Function *ModuleInitFunction() override {
     llvm::Function *LoadFunction = llvm::Function::Create(
@@ -1391,30 +1389,28 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         llvm::BasicBlock::Create(VMContext, "entry", LoadFunction);
     CGBuilderTy B(CGM, VMContext);
     B.SetInsertPoint(EntryBB);
-    auto *SelStart = GetSectionStart(SelSection);
-    auto *SelEnd = GetSectionStop(SelSection);
-    auto *ClsStart = GetSectionStart(ClsSection);
-    auto *ClsEnd = GetSectionStop(ClsSection);
-    auto *ClsRefStart = GetSectionStart(ClsRefSection);
-    auto *ClsRefEnd = GetSectionStop(ClsRefSection);
-    auto *CatStart = GetSectionStart(CatSection);
-    auto *CatEnd = GetSectionStop(CatSection);
-    auto *ProtocolStart = GetSectionStart(ProtocolSection);
-    auto *ProtocolEnd = GetSectionStop(ProtocolSection);
-    auto *ProtocolRefStart = GetSectionStart(ProtocolRefSection);
-    auto *ProtocolRefEnd = GetSectionStop(ProtocolRefSection);
-    auto *ClassAliasStart = GetSectionStart(ClassAliasSection);
-    auto *ClassAliasEnd = GetSectionStop(ClassAliasSection);
-    auto *ConstantStringStart = GetSectionStart(ConstantStringSection);
-    auto *ConstantStringEnd = GetSectionStop(ConstantStringSection);
-    auto *InitStruct = EmitRuntimeStruct(".objc_init",
-        {llvm::ConstantInt::get(Int64Ty, 0), SelStart, SelEnd, ClsStart,
-        ClsEnd, ClsRefStart, ClsRefEnd, CatStart, CatEnd, ProtocolStart,
-        ProtocolEnd, ProtocolRefStart, ProtocolRefEnd, ClassAliasStart,
-        ClassAliasEnd, ConstantStringStart, ConstantStringEnd},
-        llvm::GlobalValue::LinkOnceODRLinkage, true);
+    ConstantInitBuilder builder(CGM);
+    auto InitStructBuilder = builder.beginStruct();
+    InitStructBuilder.addInt(Int64Ty, 0);
+    auto addSection = [&](const char *section) {
+      auto bounds = GetSectionBounds(section);
+      InitStructBuilder.add(bounds.first);
+      InitStructBuilder.add(bounds.second);
+    };
+    addSection(SelSection);
+    addSection(ClsSection);
+    addSection(ClsRefSection);
+    addSection(CatSection);
+    addSection(ProtocolSection);
+    addSection(ProtocolRefSection);
+    addSection(ClassAliasSection);
+    addSection(ConstantStringSection);
+    auto *InitStruct = InitStructBuilder.finishAndCreateGlobal(".objc_init",
+        CGM.getPointerAlign());
+    InitStruct->setLinkage(llvm::GlobalValue::LinkOnceODRLinkage);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
     InitStruct->setComdat(TheModule.getOrInsertComdat(".objc_init"));
+
     CallRuntimeFunction(B, "__objc_load", {InitStruct});;
     B.CreateRetVoid();
     // Make sure that the optimisers don't delete this function.
