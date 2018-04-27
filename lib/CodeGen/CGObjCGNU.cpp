@@ -945,7 +945,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
 
   ConstantAddress GenerateConstantString(const StringLiteral *SL) override {
 
-    std::string Str = SL->getString().str();
+    auto Str = SL->getString();
     CharUnits Align = CGM.getPointerAlign();
 
     // Look for an existing one
@@ -954,30 +954,20 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       return ConstantAddress(old->getValue(), Align);
 
     bool isNonASCII = SL->containsNonAscii();
+
+    auto LiteralLength = SL->getLength(); 
    
     if ((CGM.getTarget().getPointerWidth(0) == 64) &&
-        (SL->getLength() < 9) && !isNonASCII) {
-      // Tiny strings are (roughly):
-      //   struct
-      //   {
-      //     uintptr_t char0  :7;
-      //     uintptr_t char1  :7;
-      //     uintptr_t char2  :7;
-      //     uintptr_t char3  :7;
-      //     uintptr_t char4  :7;
-      //     uintptr_t char5  :7;
-      //     uintptr_t char6  :7;
-      //     uintptr_t char7  :7;
-      //     uintptr_t length :5;
-      //     uintptr_t tag    :3;
-      //   };
-      //   With a tag value of 4.
+        (LiteralLength < 9) && !isNonASCII) {
+      // Tiny strings are only used on 64-bit platforms.  They store 8 7-bit
+      // ASCII characters in the high 56 bits, followed by a 4-bit length and a
+      // 3-bit tag (which is always 4).
       uint64_t str = 0;
       // Fill in the characters
-      for (unsigned i=0 ; i<SL->getLength() ; i++)
-        str |= ((uint64_t)SL->getCodeUnit(i)) << (57 - (i*7));
+      for (unsigned i=0 ; i<LiteralLength ; i++)
+        str |= ((uint64_t)SL->getCodeUnit(i)) << ((64 - 4 - 3) - (i*7));
       // Fill in the length
-      str |= SL->getLength() << 3;
+      str |= LiteralLength << 3;
       // Set the tag
       str |= 4;
       auto *ObjCStr = llvm::ConstantExpr::getIntToPtr(
@@ -1018,12 +1008,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // ASCII strings, the number of bytes is equal to the number of non-ASCII
     // codepoints.
     if (isNonASCII) {
-      unsigned NumBytes = Str.size();
-      SmallVector<llvm::UTF16, 128> ToBuf(NumBytes + 1); // +1 for ending nulls.
+      unsigned NumU8CodeUnits = Str.size();
+      // A UTF-16 representation of a unicode string contains at most the same
+      // number of code units as a UTF-8 representation.  Allocate that much
+      // space, plus one for the final null character.
+      SmallVector<llvm::UTF16, 128> ToBuf(NumU8CodeUnits + 1);
       const llvm::UTF8 *FromPtr = (const llvm::UTF8 *)Str.data();
       llvm::UTF16 *ToPtr = &ToBuf[0];
-      (void)llvm::ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes, &ToPtr,
-          ToPtr + NumBytes, llvm::strictConversion);
+      (void)llvm::ConvertUTF8toUTF16(&FromPtr, FromPtr + NumU8CodeUnits,
+          &ToPtr, ToPtr + NumU8CodeUnits, llvm::strictConversion);
       uint32_t StringLength = ToPtr - &ToBuf[0];
       // Add null terminator
       *ToPtr = 0;
@@ -1054,13 +1047,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       // Data pointer
       Fields.add(MakeConstantString(Str));
     }
-    std::string StringName = ".objc_str_" + Str;
+    std::string StringName = (".objc_str_" + Str).str();
     std::replace(StringName.begin(), StringName.end(),
       '@', '\1');
     auto *ObjCStrGV =
-      Fields.finishAndCreateGlobal(StringName, Align);
+      Fields.finishAndCreateGlobal(StringName, Align, false,
+          llvm::GlobalValue::LinkOnceODRLinkage);
     ObjCStrGV->setSection(ConstantStringSection);
-    ObjCStrGV->setLinkage(llvm::GlobalValue::ExternalLinkage);
     ObjCStrGV->setComdat(TheModule.getOrInsertComdat(StringName));
     ObjCStrGV->setVisibility(llvm::GlobalValue::HiddenVisibility);
     llvm::Constant *ObjCStr = llvm::ConstantExpr::getBitCast(ObjCStrGV, IdTy);
@@ -1074,6 +1067,14 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
             const Decl *OCD,
             bool isSynthesized=true, bool
             isDynamic=true) override {
+    // struct objc_property
+    // {
+    //   const char *name;
+    //   const char *attributes;
+    //   const char *type;
+    //   SEL getter;
+    //   SEL setter;
+    // };
     auto Fields = PropertiesArray.beginStruct(PropertyMetadataTy);
     ASTContext &Context = CGM.getContext();
     Fields.add(MakeConstantString(property->getNameAsString()));
@@ -1098,12 +1099,22 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
 
   llvm::Constant *
   GenerateProtocolMethodList(ArrayRef<const ObjCMethodDecl*> Methods) override {
-    // Get the method structure type.
+    // struct objc_protocol_method_description
+    // {
+    //   SEL selector;
+    //   const char *types;
+    // };
     llvm::StructType *ObjCMethodDescTy =
       llvm::StructType::get(CGM.getLLVMContext(),
           { PtrToInt8Ty, PtrToInt8Ty });
     ASTContext &Context = CGM.getContext();
     ConstantInitBuilder Builder(CGM);
+    // struct objc_protocol_method_description_list
+    // {
+    //   int count;
+    //   int size;
+    //   struct objc_protocol_method_description methods[];
+    // };
     auto MethodList = Builder.beginStruct();
     // int count;
     MethodList.addInt(IntTy, Methods.size());
@@ -1175,7 +1186,8 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
           Flag = 3;
           break;
       case Qualifiers::OCL_None:
-      default:
+      case Qualifiers::OCL_Autoreleasing:
+        assert(Ownership != Qualifiers::OCL_Autoreleasing);
         Flag = 0;
     }
     return Flag;
@@ -1195,7 +1207,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       // Emit a placeholder symbol.  
       GV = new llvm::GlobalVariable(TheModule, ProtocolTy, false,
           llvm::GlobalValue::ExternalLinkage, nullptr, Name);
-      GV->setAlignment(4);
+      GV->setAlignment(CGM.getPointerAlign().getQuantity());
     }
     return llvm::ConstantExpr::getBitCast(GV, ProtocolPtrTy);
   }
