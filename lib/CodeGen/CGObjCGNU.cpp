@@ -1406,8 +1406,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     addSection(ClassAliasSection);
     addSection(ConstantStringSection);
     auto *InitStruct = InitStructBuilder.finishAndCreateGlobal(".objc_init",
-        CGM.getPointerAlign());
-    InitStruct->setLinkage(llvm::GlobalValue::LinkOnceODRLinkage);
+        CGM.getPointerAlign(), false, llvm::GlobalValue::LinkOnceODRLinkage);
     InitStruct->setVisibility(llvm::GlobalValue::HiddenVisibility);
     InitStruct->setComdat(TheModule.getOrInsertComdat(".objc_init"));
 
@@ -1438,13 +1437,15 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     // meaningful.
     auto createNullGlobal = [&](StringRef Name, ArrayRef<llvm::Constant*> Init,
         StringRef Section) {
-      auto *GV = EmitRuntimeStruct(Name, Init,
-          llvm::GlobalValue::LinkOnceODRLinkage, true, Section);
-      GV->setAlignment(CGM.getPointerAlign().getQuantity());
+      auto nullBuilder = builder.beginStruct();
+      for (auto *F : Init)
+        nullBuilder.add(F);
+      auto GV = nullBuilder.finishAndCreateGlobal(Name, CGM.getPointerAlign(),
+          false, llvm::GlobalValue::LinkOnceODRLinkage);
       GV->setSection(Section);
       GV->setComdat(TheModule.getOrInsertComdat(Name));
-      CGM.addUsedGlobal(GV);
       GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+      CGM.addUsedGlobal(GV);
       return GV;
     };
     createNullGlobal(".objc_null_selector", {NULLPtr, NULLPtr}, SelSection);
