@@ -942,24 +942,6 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     llvm::Value *Fn = CGM.CreateRuntimeFunction(FT, FunctionName);
     B.CreateCall(Fn, Args);
   }
-  llvm::GlobalVariable *EmitRuntimeStruct(StringRef Name,
-      ArrayRef<llvm::Constant*> Fields,
-      llvm::GlobalValue::LinkageTypes Link=llvm::GlobalValue::InternalLinkage,
-      bool Comdat=false,
-      StringRef Section=StringRef()) {
-    SmallVector<llvm::Type *,8> Types;
-    for (auto *Field : Fields)
-      Types.push_back(Field->getType());
-    auto *Type = llvm::StructType::create(Types);
-    auto *Init = llvm::ConstantStruct::get(Type, Fields);
-    auto *GV = new llvm::GlobalVariable(TheModule, Type, false, Link, Init,
-        Name);
-    if (Comdat)
-      GV->setComdat(TheModule.getOrInsertComdat(Name));
-    if (Section != StringRef())
-      GV->setSection(Section);
-    return GV;
-  }
 
   ConstantAddress GenerateConstantString(const StringLiteral *SL) override {
 
@@ -1248,8 +1230,13 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
         Protocols.size());
     llvm::Constant * ProtocolArray = llvm::ConstantArray::get(ProtocolArrayTy,
         Protocols);
-    return EmitRuntimeStruct(".objc_protocol_list", {NULLPtr,
-        llvm::ConstantInt::get(SizeTy, Protocols.size()), ProtocolArray});
+    ConstantInitBuilder builder(CGM);
+    auto ProtocolBuilder = builder.beginStruct();
+    ProtocolBuilder.addNullPointer(PtrTy);
+    ProtocolBuilder.addInt(SizeTy, Protocols.size());
+    ProtocolBuilder.add(ProtocolArray);
+    return ProtocolBuilder.finishAndCreateGlobal(".objc_protocol_list",
+        CGM.getPointerAlign(), false, llvm::GlobalValue::InternalLinkage);
   }
 
   void GenerateProtocol(const ObjCProtocolDecl *PD) override {
@@ -1282,28 +1269,33 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     EmitProtocolMethodList(PD->class_methods(), ClassMethodList,
         OptionalClassMethodList);
 
-    llvm::Constant *PropertyList =
-      GeneratePropertyList(nullptr, PD, false, false);
-    llvm::Constant *OptionalPropertyList =
-      GeneratePropertyList(nullptr, PD, false, true);
-    llvm::Constant *ClassPropertyList =
-      GeneratePropertyList(nullptr, PD, true, false);
-    llvm::Constant *OptionalClassPropertyList =
-      GeneratePropertyList(nullptr, PD, true, true);
-
     auto SymName = SymbolForProtocol(ProtocolName);
     auto *OldGV = TheModule.getGlobalVariable(SymName);
     // The isa pointer must be set to a magic number so the runtime knows it's
     // the correct layout.
-    auto *GV = EmitRuntimeStruct(SymName,
-      {llvm::ConstantExpr::getIntToPtr(llvm::ConstantInt::get(Int32Ty,
-            ProtocolVersion), IdTy), MakeConstantString(ProtocolName),
-            ProtocolList, InstanceMethodList,
-      ClassMethodList, OptionalInstanceMethodList, OptionalClassMethodList,
-      PropertyList, OptionalPropertyList, ClassPropertyList,
-      OptionalClassPropertyList}, llvm::GlobalValue::ExternalLinkage,
-      true, ProtocolSection);
-    GV->setAlignment(CGM.getPointerAlign().getQuantity());
+    ConstantInitBuilder builder(CGM);
+    auto ProtocolBuilder = builder.beginStruct();
+    ProtocolBuilder.add(llvm::ConstantExpr::getIntToPtr(
+          llvm::ConstantInt::get(Int32Ty, ProtocolVersion), IdTy));
+    ProtocolBuilder.add(MakeConstantString(ProtocolName));
+    ProtocolBuilder.add(ProtocolList);
+    ProtocolBuilder.add(InstanceMethodList);
+    ProtocolBuilder.add(ClassMethodList);
+    ProtocolBuilder.add(OptionalInstanceMethodList);
+    ProtocolBuilder.add(OptionalClassMethodList);
+    // Required instance properties
+    ProtocolBuilder.add(GeneratePropertyList(nullptr, PD, false, false));
+    // Optional instance properties
+    ProtocolBuilder.add(GeneratePropertyList(nullptr, PD, false, true));
+    // Required class properties
+    ProtocolBuilder.add(GeneratePropertyList(nullptr, PD, true, false));
+    // Optional class properties
+    ProtocolBuilder.add(GeneratePropertyList(nullptr, PD, true, true));
+
+    auto *GV = ProtocolBuilder.finishAndCreateGlobal(SymName,
+        CGM.getPointerAlign(), false, llvm::GlobalValue::ExternalLinkage);
+    GV->setSection(ProtocolSection);
+    GV->setComdat(TheModule.getOrInsertComdat(SymName));
     if (OldGV) {
       OldGV->replaceAllUsesWith(llvm::ConstantExpr::getBitCast(GV,
             OldGV->getType()));
@@ -1354,12 +1346,16 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       MangledTypes).str();
     if (auto *GV = TheModule.getNamedGlobal(SelVarName))
       return EnforceType(GV, SelectorTy);
-    auto *Name = ExportUniqueString(Sel.getAsString(), ".objc_sel_name_", true);
-    llvm::Constant *Types = GetTypeString(TypeEncoding);
-    auto *GV = EmitRuntimeStruct(SelVarName, {Name, Types},
-        llvm::GlobalValue::LinkOnceODRLinkage, true, SelSection);
+    ConstantInitBuilder builder(CGM);
+    auto SelBuilder = builder.beginStruct();
+    SelBuilder.add(ExportUniqueString(Sel.getAsString(), ".objc_sel_name_",
+          true));
+    SelBuilder.add(GetTypeString(TypeEncoding));
+    auto *GV = SelBuilder.finishAndCreateGlobal(SelVarName,
+        CGM.getPointerAlign(), false, llvm::GlobalValue::LinkOnceODRLinkage);
     GV->setComdat(TheModule.getOrInsertComdat(SelVarName));
     GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    GV->setSection(SelSection);
     auto *SelVal = EnforceType(GV, SelectorTy);
     return SelVal;
   }
@@ -1464,13 +1460,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     if (!EmittedProtocolRef)
       createNullGlobal(".objc_null_protocol_ref", {NULLPtr}, ProtocolRefSection);
     if (!ClassAliases.empty())
-      for (auto clsAlias : ClassAliases) {
-        auto alias = EmitRuntimeStruct(std::string(".objc_class_alias") +
+      for (auto clsAlias : ClassAliases)
+        createNullGlobal(std::string(".objc_class_alias") +
             clsAlias.second, { MakeConstantString(clsAlias.second),
-            GetClassVar(clsAlias.first) }, llvm::GlobalValue::ExternalLinkage,
-            true, ClassAliasSection);
-        alias->setAlignment(CGM.getPointerAlign().getQuantity());
-      }
+            GetClassVar(clsAlias.first) }, ClassAliasSection);
     else
       createNullGlobal(".objc_null_class_alias", { NULLPtr, NULLPtr },
           ClassAliasSection);
