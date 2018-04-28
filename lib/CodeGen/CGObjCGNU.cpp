@@ -1047,15 +1047,31 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       // Data pointer
       Fields.add(MakeConstantString(Str));
     }
-    std::string StringName = (".objc_str_" + Str).str();
-    std::replace(StringName.begin(), StringName.end(),
-      '@', '\1');
+    std::string StringName;
+    bool isNamed = !isNonASCII;
+    if (isNamed) {
+      StringName = ".objc_str_";
+      for (int i=0,e=Str.size() ; i<e ; ++i) {
+        char c = Str[i];
+        if (isalpha(c) || isnumber(c))
+          StringName += c;
+        else if (c == ' ')
+          StringName += '_';
+        else {
+          isNamed = false;
+          break;
+        }
+      }
+    }
     auto *ObjCStrGV =
-      Fields.finishAndCreateGlobal(StringName, Align, false,
-          llvm::GlobalValue::LinkOnceODRLinkage);
+      Fields.finishAndCreateGlobal(isNamed ? StringName : ".objc_string",
+          Align, false, isNamed ? llvm::GlobalValue::LinkOnceODRLinkage :
+          llvm::GlobalValue::PrivateLinkage);
     ObjCStrGV->setSection(ConstantStringSection);
-    ObjCStrGV->setComdat(TheModule.getOrInsertComdat(StringName));
-    ObjCStrGV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    if (isNamed) {
+      ObjCStrGV->setComdat(TheModule.getOrInsertComdat(StringName));
+      ObjCStrGV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    }
     llvm::Constant *ObjCStr = llvm::ConstantExpr::getBitCast(ObjCStrGV, IdTy);
     ObjCStrings[Str] = ObjCStr;
     ConstantStrings.push_back(ObjCStr);
