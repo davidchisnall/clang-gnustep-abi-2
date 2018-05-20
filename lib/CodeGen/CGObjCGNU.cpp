@@ -1064,9 +1064,10 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       }
     }
     auto *ObjCStrGV =
-      Fields.finishAndCreateGlobal(isNamed ? StringName : ".objc_string",
-          Align, false, isNamed ? llvm::GlobalValue::LinkOnceODRLinkage :
-          llvm::GlobalValue::PrivateLinkage);
+      Fields.finishAndCreateGlobal(
+          isNamed ? StringRef(StringName) : ".objc_string",
+          Align, false, isNamed ? llvm::GlobalValue::LinkOnceODRLinkage
+                                : llvm::GlobalValue::PrivateLinkage);
     ObjCStrGV->setSection(ConstantStringSection);
     if (isNamed) {
       ObjCStrGV->setComdat(TheModule.getOrInsertComdat(StringName));
@@ -1168,12 +1169,14 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
     ClassSymbol = new llvm::GlobalVariable(TheModule,
         IdTy, false, llvm::GlobalValue::ExternalLinkage,
         nullptr, SymbolName);
-    if (isWeak) {
-      // Placeholder for the real symbol.
+    // If this is a weak symbol, then we are creating a valid definition for
+    // the symbol, pointing to a weak definition of the real class pointer.  If
+    // this is not a weak reference, then we are expecting another compilation
+    // unit to provide the real indirection symbol.
+    if (isWeak)
       ClassSymbol->setInitializer(new llvm::GlobalVariable(TheModule,
           Int8Ty, false, llvm::GlobalValue::ExternalWeakLinkage,
           nullptr, SymbolForClass(Name)));
-    }
     assert(ClassSymbol->getName() == SymbolName);
     return ClassSymbol;
   }
