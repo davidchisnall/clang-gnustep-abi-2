@@ -35,6 +35,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ConvertUTF.h"
+#include <cctype>
 
 using namespace clang;
 using namespace CodeGen;
@@ -1053,7 +1054,7 @@ class CGObjCGNUstep2 : public CGObjCGNUstep {
       StringName = ".objc_str_";
       for (int i=0,e=Str.size() ; i<e ; ++i) {
         char c = Str[i];
-        if (isalpha(c) || isnumber(c))
+        if (isalnum(c))
           StringName += c;
         else if (c == ' ')
           StringName += '_';
